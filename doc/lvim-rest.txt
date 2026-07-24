@@ -1,0 +1,218 @@
+*lvim-rest.txt*    A REST / HTTP client for .http documents with a native Rust engine
+
+==============================================================================
+CONTENTS                                                          *lvim-rest*
+
+  1. Introduction ........................... |lvim-rest-intro|
+  2. Setup .................................. |lvim-rest-setup|
+  3. The .http document ..................... |lvim-rest-document|
+  4. Variables .............................. |lvim-rest-variables|
+  5. Environments ........................... |lvim-rest-environments|
+  6. Execution engines ...................... |lvim-rest-engines|
+  7. The response dock ...................... |lvim-rest-dock|
+  8. Commands ............................... |lvim-rest-commands|
+  9. Keymaps ................................ |lvim-rest-keymaps|
+  10. Configuration ......................... |lvim-rest-config|
+  11. Health ................................ |lvim-rest-health|
+  12. Highlights ............................ |lvim-rest-highlights|
+  13. Roadmap ............................... |lvim-rest-roadmap|
+
+==============================================================================
+1. INTRODUCTION                                             *lvim-rest-intro*
+
+lvim-rest executes HTTP requests straight from `.http` / `.rest` documents. It
+has two execution engines: the native Rust daemon `lvim-rest-core` (reqwest,
+HTTP/1.1 and HTTP/2) when built, and a pure-`curl` fallback for HTTP/GraphQL
+otherwise — selection is automatic. A line-oriented Lua parser is the execution
+parser (never dependent on a treesitter grammar); treesitter is used only to
+highlight the `.http` buffer and the response body.
+
+Requests carry a rich variable system (document / request-local / environment /
+dynamic / process-env / dotenv / vaulted secrets), request chaining, interactive
+prompts, metadata directives, and response formatting. Every popup and dock uses
+the canonical lvim-ui components; the plugin self-themes from the lvim-utils
+palette.
+
+==============================================================================
+2. SETUP                                                    *lvim-rest-setup*
+>lua
+  require("lvim-rest").setup()
+<
+`setup()` merges your options into the live config (see |lvim-rest-config|),
+self-themes, registers the `:LvimRest` command, and installs the buffer-local
+maps on `http` / `rest` buffers. Both `.http` and `.rest` extensions are mapped
+to the `http` filetype at startup.
+
+To build the native daemon (optional): >
+  sh core/build.sh
+<
+Without it, HTTP and GraphQL run through `curl`.
+
+==============================================================================
+3. THE .HTTP DOCUMENT                                    *lvim-rest-document*
+
+Requests are separated by `###`; text after `###` is the display name. The
+first request needs no separator. A request line is `METHOD url [HTTP/x.y]`;
+a bare URL implies GET. Methods include the standard HTTP verbs plus the
+pseudo-methods GRAPHQL, GRPC and WEBSOCKET.
+
+Headers follow as `Name: value`; the body follows one blank line. The body may
+come from a file (`< ./payload.json`, or `<@ ./file` to substitute variables in
+the included file); the response may be saved with `>> ./out.json` (`>>!`
+overwrites). Comments are `#` or `//`.
+
+Metadata directives (`# @…` on a request): >
+  # @name id            chain / replay id (also set from the ### label)
+  # @prompt var [desc]   interactive input, asked before send
+  # @timeout ms          per-request timeout
+  # @no-log              keep out of history
+  # @no-cookie-jar       opt out of the cookie jar
+  # @accept chunked      stream mode
+  # @jq expr             auto-filter the response body
+  # @curl-<flag>[=value] pass a raw curl flag (escape hatch)
+  # @stdin-cmd var cmd   fill a variable from a shell command
+<
+==============================================================================
+4. VARIABLES                                            *lvim-rest-variables*
+
+Variables are written `{{name}}`. Resolution order, first hit wins:
+
+  1. prompt              # @prompt var
+  2. request-local       @var = value inside a request block
+  3. document            @var = value before the first request
+  4. environment file    http-client.env.json active profile
+  5. {{$processEnv VAR}}  an OS environment variable
+  6. {{$dotenv VAR}}      a value from a discovered .env
+  7. dynamic             {{$uuid}} {{$timestamp}} {{$isoTimestamp}}
+                         {{$date [fmt]}} {{$randomInt [min max]}}
+  8. {{vault "key"}}      an lvim-keyring secret
+
+Chained values reference a previous run of a named request:
+`{{name.response.body.$.path}}`, `{{name.response.headers.X}}`,
+`{{name.request.body.$.x}}`. A request that references another auto-runs its
+dependencies first (config `request.chain.auto_run`).
+
+Dynamic variables are extensible: >lua
+  require("lvim-rest.vars.dynamic").register("$myid", function(args)
+      return "..."
+  end)
+<
+An unresolved `{{…}}` token is left verbatim (never blanked) so a missing
+variable is visible in the request and in `:LvimRest inspect`.
+
+==============================================================================
+5. ENVIRONMENTS                                      *lvim-rest-environments*
+
+`http-client.env.json` and `http-client.private.env.json` are discovered by
+walking up from the file to the project root. Each is a map of named profiles
+(dev / prod / …) to a flat variable map; the private file overlays the public
+one for the same profile. `.env` files feed `{{$dotenv}}`.
+
+The active profile is sticky per project (persisted in the plugin store). Switch
+it with `:LvimRest env` (a picker) or `:LvimRest env <name>`.
+
+==============================================================================
+6. EXECUTION ENGINES                                      *lvim-rest-engines*
+
+`backend = "auto"` (default) uses the daemon when built, else `curl` for HTTP
+and GraphQL with a one-time notice. `"daemon"` requires the daemon; `"curl"`
+forces the fallback. gRPC, WebSocket and HTTP/3 are daemon-only.
+
+The daemon (`lvim-rest-core`) is a Rust process spoken to over newline-delimited
+JSON on stdio; it receives already-resolved request values and stores no
+secrets. Build it with `sh core/build.sh`; `:checkhealth lvim-rest` reports its
+presence.
+
+==============================================================================
+7. THE RESPONSE DOCK                                         *lvim-rest-dock*
+
+The response opens in a docked lvim-ui surface. The header bar switches views
+(the active one full-accent):
+
+  body      the pretty-printed body (treesitter for its Content-Type)
+  headers   the status line + response headers
+  both      headers then body
+  stats     timing split, sizes, HTTP version, engine
+  verbose   the full request/response transcript
+  script    script output (roadmap)
+  report    assertions (roadmap)
+
+A `jq` button filters the body live. The footer actions are yank / save /
+copy-as-curl / replay / close. An oversized body (`format.max_size`) is diverted
+to a scratch file and the dock shows the notice + the headers/stats views.
+
+==============================================================================
+8. COMMANDS                                              *lvim-rest-commands*
+
+                                                              *:LvimRest*
+:LvimRest                 print status (engine, in-flight count, subcommands)
+:LvimRest send            send the request under the cursor
+:LvimRest all             send every request in the buffer
+:LvimRest replay          replay the last request
+:LvimRest cancel          cancel in-flight requests
+:LvimRest inspect         show the fully resolved request (secrets masked)
+:LvimRest env [name]      switch the active environment
+:LvimRest history         the request-history picker
+:LvimRest import [curl]   import a pasted curl command at the cursor
+:LvimRest scratch         open a persistent scratch .http buffer
+:LvimRest next            jump to the next request
+:LvimRest prev            jump to the previous request
+:LvimRest close           close the response dock
+
+==============================================================================
+9. KEYMAPS                                                *lvim-rest-keymaps*
+
+Buffer-local on `http` / `rest` buffers (all configurable via `keys`):
+
+  <CR>          send the request under the cursor
+  <leader>ra    send all
+  <leader>rr    replay last
+  <leader>rx    cancel
+  <leader>ri    inspect resolved request
+  ]r / [r       next / previous request
+
+==============================================================================
+10. CONFIGURATION                                          *lvim-rest-config*
+
+See the README for the full default `setup()` block; it is kept in sync with
+`lua/lvim-rest/config.lua`. Notable keys: `backend`, `daemon`, `dock.layout`,
+`default_view`, `env`, `request` (timeout / redirects / http_version / chain),
+`format` (indent / jq_bin / xmllint_bin / max_size), `vault`, `history`,
+`scrub_secrets`, `prompt.cache`, `inline_status`, `keys`, `icons`.
+
+==============================================================================
+11. HEALTH                                                 *lvim-rest-health*
+
+`:checkhealth lvim-rest` reports the active engine (daemon / curl), the optional
+tools (jq, xmllint), the sqlite history DB, lvim-keyring (secret vaulting), the
+treesitter `http` grammar (add `"http"` to lvim-ts `ensure_installed` for
+highlight), and the lvim-cmp variable source.
+
+==============================================================================
+12. HIGHLIGHTS                                         *lvim-rest-highlights*
+
+All groups self-theme from the lvim-utils palette and rebuild on ColorScheme:
+
+  LvimRestGet LvimRestPost LvimRestPut LvimRestPatch LvimRestDelete
+  LvimRestGraphql LvimRestGrpc LvimRestWebsocket        method accents
+  LvimRestStatus2xx/3xx/4xx/5xx                         status accents
+  LvimRestHeaderName LvimRestHeaderValue                header view
+  LvimRestStatsKey LvimRestStatsVal                     stats view
+  LvimRestVerboseReq LvimRestVerboseResp                verbose transcript
+  LvimRestPass LvimRestFail                             report
+  LvimRestSent LvimRestRecv                             WebSocket transcript
+  LvimRestCursorLine                                    the dock cursor line
+  LvimRestEnv                                           the env chip
+
+==============================================================================
+13. ROADMAP                                               *lvim-rest-roadmap*
+
+Planned and partially scaffolded (config keys reserved): the dedicated full-tab
+workbench + sqlite request library (workspaces / collections / folders /
+requests / examples / environments / runs) with a docked explorer and
+request-to-buffer binding; the collection runner with data-file iterations; Lua
+scripting with tests / assertions; OAuth2 (incl. authorization_code / PKCE);
+native gRPC (reflection, streaming) and WebSocket; and Postman v2.1 / OpenAPI /
+HAR import-export.
+
+vim:tw=78:ts=8:ft=help:norl:

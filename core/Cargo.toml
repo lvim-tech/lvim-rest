@@ -1,0 +1,49 @@
+[package]
+name = "lvim-rest-core"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "lvim-rest daemon: the native execution engine (HTTP/1.1·2 today; gRPC/WebSocket/HTTP-3 to come) spoken to over newline-delimited JSON-RPC on stdio"
+
+# A binary (the daemon), NOT a cdylib: HTTP work needs a tokio runtime, connection
+# pools, TLS and cancellation, so the backend is a spawned child process
+# (crash-isolated from Neovim) — the lvim-db / lvim-keyring precedent.
+[[bin]]
+name = "lvim-rest-daemon"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "io-std",
+    "io-util",
+    "sync",
+    "time",
+    "process",
+    "net",
+] }
+futures-util = "0.3"
+base64 = "0.22"
+anyhow = "1"
+
+# reqwest with rustls (no OpenSSL / native-tls): HTTP/1.1 + HTTP/2 (ALPN), streaming
+# bodies, transparent decompression, a cookie store, redirects, client-cert / proxy.
+# HTTP/3, gRPC (tonic) and WebSocket (tokio-tungstenite) land in phase 7 behind features.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+    "gzip",
+    "brotli",
+    "deflate",
+    "cookies",
+    "charset",
+    "http2",
+    "socks",
+] }
+
+[profile.release]
+opt-level = 2
+strip = true
