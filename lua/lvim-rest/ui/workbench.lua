@@ -34,6 +34,19 @@ local ID = "lvim-rest"
 ---@type table?
 local sidebar = nil
 
+--- Paint the editor pane's blue TITLE band — the same native-split-title canon lvim-db's editor / drawer /
+--- result bands use (`LvimUiPeekTitle`, deepening to `…Hover` when the window is current), centred text.
+--- Matches the tree ("REST") and response dock bands so all three panes read alike.
+---@param win integer?
+---@param text string
+local function set_editor_title(win, text)
+    if not (win and api.nvim_win_is_valid(win)) then
+        return
+    end
+    vim.wo[win].winhighlight = "WinBar:LvimUiPeekTitleHover,WinBarNC:LvimUiPeekTitle"
+    vim.wo[win].winbar = "%=" .. text .. "%="
+end
+
 --- The placeholder shown in the editor pane before a request is opened — it tells you what to press.
 ---@return string[]
 local function placeholder()
@@ -91,6 +104,9 @@ function M.open()
             return true
         end,
     })
+    -- Blue title band on the editor pane (the tree + response dock carry their own) — until a request is
+    -- opened it reads "EDITOR", then the request name (see `show_request`).
+    set_editor_title(M.editor_win(), "EDITOR")
     return true
 end
 
@@ -109,6 +125,9 @@ function M.show_request(id)
     local win = M.editor_win() or api.nvim_get_current_win()
     pcall(api.nvim_win_set_buf, win, buf)
     pcall(api.nvim_set_current_win, win)
+    -- The editor title band names the open request (from its `### <name>` first line).
+    local row = require("lvim-rest.store.library").request(id)
+    set_editor_title(win, "  " .. ((row and row.name) or "request") .. "  ")
     return true
 end
 
@@ -120,6 +139,17 @@ function M.focus_library()
         return
     end
     workspace.focus(ID)
+    -- Find the tree window by its filetype in the workbench tab (a native-split surface doesn't expose its
+    -- window on the handle reliably); fall back to the stored sidebar handle.
+    local tab = workspace.tab_for(ID)
+    if tab then
+        for _, w in ipairs(api.nvim_tabpage_list_wins(tab)) do
+            if api.nvim_win_is_valid(w) and vim.bo[api.nvim_win_get_buf(w)].filetype == "LvimRestLibrary" then
+                pcall(api.nvim_set_current_win, w)
+                return
+            end
+        end
+    end
     if sidebar and sidebar.win and api.nvim_win_is_valid(sidebar.win) then
         pcall(api.nvim_set_current_win, sidebar.win)
     end

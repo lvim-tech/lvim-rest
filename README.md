@@ -38,10 +38,10 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
   examples, environments and run history, stored in the same sqlite database as the history.
   Reorderable (`ord` is persisted), and each request opens as an ordinary `.http` buffer bound to its
   row: `:w` re-parses it and updates the record, so the request *builder* is just the editor.
-- **The workbench** — `:LvimRest workbench` opens a tab of its own with the library tree beside the
-  request editor and a persistent response dock; `:LvimRest dock` toggles between two layouts
-  (editor-over-response on the right with a full-height tree, or a full-width result under the top row).
-  `:LvimRest library` docks the same tree as a sidebar next to whatever you are already doing.
+- **The workbench** — `:LvimRest` opens a tab of its own with the library tree beside the request
+  editor and a persistent response dock, and focuses the tree — one coherent full-tab client, like
+  `:LvimDb`. `:LvimRest dock` toggles between two layouts (editor-over-response on the right with a
+  full-height tree, or a full-width result under the top row).
 - **Lua scripting + tests** — `< {% … %}` before a request and `> {% … %}` after the response (or a
   `< ./setup.lua` / `> ./check.lua` file). They are **Lua**, not JavaScript: the host language is
   already Lua, so there is no JS engine to ship. A pre-script may rewrite `request.method` / `url` /
@@ -117,12 +117,11 @@ sh core/build.sh
 ## Usage
 
 Open a `.http` file, put the cursor on a request, and press `<CR>` to send it — the response opens in
-the dock. `:LvimRest` with no argument prints status; the subcommands are:
+the dock. Bare `:LvimRest` opens the full-tab client; the commands are:
 
 | Command | Action |
 | --- | --- |
-| `:LvimRest workbench` | toggle the full-tab workbench (library + editor + response) |
-| `:LvimRest library` | dock the library tree as a sidebar |
+| `:LvimRest` | open the full-tab client (library + editor + response) and focus the tree |
 | `:LvimRest dock` | toggle the workbench layout — editor/response stacked ⟷ full-width result |
 | `:LvimRest run [datafile]` | run the collection, once per data-file row |
 | `:LvimRest send` | send the request under the cursor |
@@ -167,8 +166,9 @@ the token from its response.
 
 ## The library, the workbench and the runner
 
-Requests do not have to live in a file. `:LvimRest workbench` opens the library in a tab of its own,
-with a persistent response dock. `:LvimRest dock` toggles between two layout states:
+Requests do not have to live in a file. `:LvimRest` opens the client in a tab of its own — the
+library tree beside the editor, with a persistent response dock. `:LvimRest dock` toggles between two
+layout states:
 
 ```
   state 1 (default)                     state 2 (:LvimRest dock)
@@ -190,8 +190,8 @@ collection, `r` renames, `d` deletes, `]e` / `[e` move an item among its sibling
 workspace, `R` refreshes — and `?` opens a window listing all of them. The panel's footer carries
 the everyday actions as clickable chips.
 
-The library panel is a singleton: `:LvimRest library` while the workbench is open focuses the
-library pane there instead of opening a second copy. Fold state survives closing and reopening it.
+`:LvimRest` is idempotent — called again it just refocuses the tree (never a second copy). Close
+the client with `q` in any of its panels. Fold state survives closing and reopening it.
 
 A run walks the collection in the order the tree shows it — a folder's own requests first, then its
 sub-folders — and it is sequential on purpose: requests routinely depend on the ones before them

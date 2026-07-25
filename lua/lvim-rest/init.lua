@@ -95,7 +95,9 @@ local function attach_buffer(bufnr)
         require("lvim-rest.ui.options").open(bufnr, vim.api.nvim_win_get_cursor(0)[1])
     end, "request options form")
     map(k.explorer, function()
-        require("lvim-rest.ui.explorer").open({ enter = true })
+        local wb = require("lvim-rest.ui.workbench")
+        wb.open()
+        wb.focus_library()
     end, "the library tree")
     map(k.run_collection, function()
         require("lvim-rest.convert").pick_collection("Run which collection?", function(cid)
@@ -108,15 +110,8 @@ end
 
 --- The subcommand table: name → handler(arg).
 ---@type table<string, fun(arg: string?, rest: string?)>
+-- Bare `:LvimRest` OPENS the client (see the command handler); these are the explicit subcommands.
 local subcommands = {
-    -- The WORKBENCH: a tab of its own with the library tree beside the request editor. `workbench`
-    -- toggles it; `library` docks just the tree as a sidebar next to whatever you are already doing.
-    workbench = function()
-        require("lvim-rest.ui.workbench").toggle()
-    end,
-    library = function()
-        require("lvim-rest.ui.explorer").open({ enter = true })
-    end,
     -- Toggle the workbench response dock between spanning UNDER THE EDITOR only (tree full-height) and
     -- FULL width under tree+editor (the lvim-db shape). Workbench-only.
     dock = function()
@@ -365,14 +360,10 @@ local function register_command()
         -- spaces in it, and `fargs[2]` would silently keep only the first word.
         local rest = sub and vim.trim((cmd.args or ""):sub(#sub + 1)) or ""
         if not sub then
-            vim.notify(
-                ("lvim-rest: engine=%s  in-flight=%d  (subcommands: %s)"):format(
-                    require("lvim-rest.backend").select(),
-                    require("lvim-rest.runner").inflight_count(),
-                    table.concat(vim.tbl_keys(subcommands), " ")
-                ),
-                vim.log.levels.INFO
-            )
+            -- Bare `:LvimRest` OPENS the client (like `:LvimDb`) — the common case deserves the short verb.
+            local wb = require("lvim-rest.ui.workbench")
+            wb.open()
+            wb.focus_library()
             return
         end
         local handler = subcommands[sub]

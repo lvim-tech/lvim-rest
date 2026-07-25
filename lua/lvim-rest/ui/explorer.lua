@@ -409,9 +409,20 @@ local INHERITED = {
     { key = "<CR> / l", desc = "open the request (or expand a folder)" },
     { key = "h", desc = "collapse / jump to the parent" },
     { key = "]e / [e", desc = "move the item among its siblings" },
-    { key = "?", desc = "this window" },
-    { key = "q", desc = "close it" },
+    { key = "g?", desc = "this window" },
+    { key = "q", desc = "close the client" },
 }
+
+--- Close the client: inside the workbench the tree is one of three panes, so `q` tears the WHOLE tab down
+--- (closing just this panel would strand the editor + response); as a standalone panel it closes itself.
+local function request_close()
+    local wb = require("lvim-rest.ui.workbench")
+    if wb.is_open() then
+        wb.close()
+    elseif panel and panel.close then
+        pcall(panel.close)
+    end
+end
 
 --- The panel's help window — the SHARED cheatsheet component (`lvim-ui.help`), the same one the
 --- lvim-lsp outline uses: striped key/description rows in a framed float, nothing hand-rolled.
@@ -423,7 +434,7 @@ local function show_help()
     for _, a in ipairs(INHERITED) do
         items[#items + 1] = { a.key, a.desc }
     end
-    require("lvim-ui").help({ title = "REST library", items = items, close_keys = { "q", "<Esc>", "?" } })
+    require("lvim-ui").help({ title = "REST library", items = items, close_keys = { "q", "<Esc>", "g?" } })
 end
 
 --- Build (once) and return the tree handle. `handle.provider` is what a host surface renders.
@@ -461,7 +472,8 @@ function M.handle()
             tree, panel = nil, nil
         end,
         on_keys = function(map)
-            map("?", show_help)
+            map("g?", show_help)
+            map("q", request_close)
             for _, action in ipairs(ACTIONS) do
                 map(action.key, function()
                     action.fn(tree and tree.selected() or nil)
@@ -496,7 +508,8 @@ local function footer_bars()
             })
         end
     end
-    items[#items + 1] = surface.button({ name = "keys", key = "?", no_hotkey = true, run = show_help })
+    items[#items + 1] = surface.button({ name = "help", key = "g?", no_hotkey = true, run = show_help })
+    items[#items + 1] = surface.button({ name = "close", key = "q", no_hotkey = true, run = request_close })
     return { { align = "center", items = items } }
 end
 

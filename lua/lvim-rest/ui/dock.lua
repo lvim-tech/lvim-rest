@@ -263,7 +263,13 @@ local function footer_spec()
             name = "close",
             key = "q",
             run = function(s)
-                s.close()
+                -- Inside the workbench the response is one of three panes, so `q` tears the WHOLE tab down
+                -- (closing just this pane would strand the tree + editor); the inline dock just closes.
+                if state.host == "workbench" then
+                    require("lvim-rest.ui.workbench").close()
+                else
+                    s.close()
+                end
             end,
         },
     }

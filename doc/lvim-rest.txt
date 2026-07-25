@@ -363,12 +363,12 @@ Secrets never reach the database: a save that would store a secret-shaped
 value either moves it into lvim-keyring and rewrites it to `{{vault "key"}}`
 (with `vault.auto = true`), or is REFUSED with the offending fields named.
 
-                                                       *:LvimRest workbench*
-`:LvimRest workbench` opens a tab of its own — the library tree beside the
-request editor, with a persistent response dock. `:LvimRest library` instead
-docks just the tree as a sidebar next to whatever you are already doing; both
-host the SAME tree, so folds stay where you left them. The tab lifecycle,
-editor pane and chrome are the shared `lvim-ui.workspace` shell.
+                                                       *lvim-rest-open*
+Bare `:LvimRest` opens a tab of its own — the library tree beside the request
+editor, with a persistent response dock — and focuses the tree. ONE command,
+like `:LvimDb` (no separate `open` / `workbench` / `library` / sidebar split).
+The tab lifecycle, editor pane and chrome are the shared `lvim-ui.workspace`
+shell.
 
                                                        *:LvimRest dock*
 `:LvimRest dock` toggles the workbench between two layout states:
@@ -394,9 +394,9 @@ Keys in the tree: >
 The footer carries the everyday actions as clickable chips; the rest are keys,
 because a bar that overflows into chevrons hides more than it shows.
 
-The panel is a SINGLETON — `:LvimRest library` while the workbench is open
-focuses the library pane there rather than opening a second copy, and the fold
-state survives closing and reopening it.
+`:LvimRest` is idempotent — called again it just refocuses the tree, never
+a second copy. Close the client with `q` in any panel; the fold state survives
+closing and reopening it.
 
 ==============================================================================
 12. THE COLLECTION RUNNER                                   *lvim-rest-runner*
@@ -482,9 +482,7 @@ library row is not duplicated — `:w` updates it.
 14. COMMANDS                                             *lvim-rest-commands*
 
                                                               *:LvimRest*
-:LvimRest                 print status (engine, in-flight count, subcommands)
-:LvimRest workbench       toggle the full-tab workbench (library + editor + response)
-:LvimRest library         dock the library tree as a sidebar
+:LvimRest                 open the full-tab client (library + editor + response), focus the tree
 :LvimRest dock            toggle the workbench layout (stacked <-> full-width result)
 :LvimRest run [datafile]  run the collection, once per data-file row
 :LvimRest send            send the request under the cursor
