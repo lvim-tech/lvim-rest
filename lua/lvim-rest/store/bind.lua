@@ -1,8 +1,9 @@
 -- lvim-rest.store.bind: the seam between a LIBRARY request row and an editable `.http` BUFFER.
 --
 -- A stored request has no file on disk. Opening one renders it as a normal `.http` document in a
--- scratch buffer tagged with `b:lvim_rest_request_id`; `:w` does not touch the filesystem — a
--- `BufWriteCmd` re-parses the buffer with the ordinary execution parser and UPDATEs the row. So the
+-- NAMELESS `nofile` scratch buffer tagged with `b:lvim_rest_request_id` (the lvim-db editor model, so the
+-- statusline never mistakes it for a file). The save key (not `:w`, which `nofile` disables) calls
+-- `write_back`, which re-parses the buffer with the ordinary execution parser and UPDATEs the row. So the
 -- request BUILDER is just the editor: treesitter highlight, the buffer-local send maps and the
 -- variable completion all work exactly as they do for a real `.http` file, and there is no second
 -- form UI to keep in sync with the parser.
@@ -158,7 +159,7 @@ local function fields_of(req)
     }
 end
 
---- Persist `fields` onto `id` and clear the buffer's modified flag (BufWriteCmd owns the write).
+--- Persist `fields` onto `id` and clear the buffer's modified flag (the save key drives the write).
 ---@param id integer
 ---@param bufnr integer
 ---@param fields table
@@ -228,7 +229,7 @@ local function vault_then_persist(id, bufnr, fields, hits)
     end
 end
 
---- Parse `bufnr` and write it back onto its bound request row. Called by the BufWriteCmd.
+--- Parse `bufnr` and write it back onto its bound request row. Called by the editor's save key.
 ---@param bufnr integer
 ---@return nil
 function M.write_back(bufnr)
@@ -294,27 +295,21 @@ function M.open(id)
         return existing
     end
 
-    local buf = api.nvim_create_buf(true, false)
-    -- A stable, unique name: it shows in the bufferlist / statusline and makes `:w` addressable.
-    local ok_name = pcall(api.nvim_buf_set_name, buf, ("lvim-rest://request/%d/%s"):format(id, row.name or "request"))
-    if not ok_name then
-        pcall(api.nvim_buf_set_name, buf, ("lvim-rest://request/%d"):format(id))
-    end
+    -- A NAMELESS, unlisted `nofile` scratch — exactly the lvim-db editor model. It is deliberately NOT a named
+    -- buffer: any name (even a `scheme://` one) is rendered by the statusline as a cwd-relative FILE path, which
+    -- made the request read as a real file on disk. Nameless + `nofile` keeps the statusline clean (just the
+    -- filetype), and the request name lives where it belongs — the editor's blue title band (winbar). The buffer
+    -- is found by `bound[id]` + `b:lvim_rest_request_id`, never by name, so losing the name costs nothing.
+    local buf = api.nvim_create_buf(false, false)
     api.nvim_buf_set_lines(buf, 0, -1, false, M.render(row))
-    vim.bo[buf].buftype = "acwrite" -- `:w` fires BufWriteCmd instead of touching the filesystem
+    vim.bo[buf].buftype = "nofile" -- not a file: `:w` is disabled; saving goes through the save key → write_back
+    vim.bo[buf].bufhidden = "hide" -- keep unsaved edits when the pane switches requests (bound[id] caches it)
     vim.bo[buf].filetype = "http"
     vim.bo[buf].swapfile = false
     vim.bo[buf].modified = false
     vim.b[buf].lvim_rest_request_id = id
 
     local grp = api.nvim_create_augroup(AUGROUP .. "_" .. id, { clear = true })
-    api.nvim_create_autocmd("BufWriteCmd", {
-        group = grp,
-        buffer = buf,
-        callback = function()
-            M.write_back(buf)
-        end,
-    })
     api.nvim_create_autocmd("BufWipeout", {
         group = grp,
         buffer = buf,

@@ -43,29 +43,6 @@ local function is_open()
     return state.surface ~= nil and state.buf ~= nil and api.nvim_buf_is_valid(state.buf)
 end
 
---- The method-accent highlight group for the current result.
----@return string
-local function method_group()
-    local m = (state.result and state.result.method) or "GET"
-    return "LvimRest" .. m:sub(1, 1):upper() .. m:sub(2):lower()
-end
-
---- The method glyph for the current result.
----@return string
-local function method_icon()
-    local map = {
-        GET = config.icons.get,
-        POST = config.icons.post,
-        PUT = config.icons.put,
-        PATCH = config.icons.patch,
-        DELETE = config.icons.delete,
-        GRAPHQL = config.icons.graphql,
-        GRPC = config.icons.grpc,
-        WEBSOCKET = config.icons.ws,
-    }
-    return map[(state.result and state.result.method) or "GET"] or config.icons.request
-end
-
 --- Stop any treesitter highlighter on the dock buffer.
 local function stop_ts()
     if state.ts_active and state.buf and api.nvim_buf_is_valid(state.buf) then
@@ -151,18 +128,49 @@ local function render()
     paint(rendered.lines, rendered.hls, rendered.filetype)
 end
 
---- The border-title box: method glyph + request name/line.
----@return table
-local function title_box()
-    local m = state.result or {}
-    local text = (state.meta and state.meta.title) or ((m.method or "") .. " " .. (m.url or ""))
-    return { icon = method_icon(), text = text, icon_hl = method_group() }
+--- The TITLE BAND text: the panel name "RESULT" (matching the tree's "REST" and the editor's "EDITOR"
+--- band). Rendered fg-only over the header's blue `title_counter` strip — the lvim-db result canon; the
+--- response's status + time ride the RIGHT of the same band (see `range_text`).
+---@return string
+local function title_left()
+    return "RESULT"
+end
+
+--- The RIGHT side of the title band: the response status + total time (the response's "counter"), or ""
+--- before the first response — so the band reads `POST … ……… 200 OK · 342 ms`.
+---@return string
+local function range_text()
+    local m = state.result
+    if not m then
+        return ""
+    end
+    local status = ("%d %s"):format(m.status or 0, m.status_text or "")
+    local total = m.timing and m.timing.total
+    return total and (status .. " · " .. total .. " ms") or status
 end
 
 -- ── header (view modes + jq) ────────────────────────────────────────────────
 
 -- Forward declaration: header_spec closes over set_view, set_view over header_spec.
 local set_view
+
+--- The view-tab button BOX-COLOUR override (passed as the record's `hl`, NOT `style` — `style` names an
+--- M.STYLES kind, `hl` is the per-state colour override merged over it). The lvim-installer TOOLBAR canon: a
+--- keyless single-part caption with symmetric padding, so ui.button auto-braces the hovered tab in `[ ]`. The
+--- YELLOW family is fg-ONLY (no background — the default `action` kind's box carries a bg, which is exactly the
+--- bg we override away here): dim yellow inactive, light-yellow-bold active, yellow-bold on the cursor.
+---@return table
+local function tab_hl()
+    return {
+        text = {
+            padding = { 1, 1 }, -- the cells the hover `[ ]` consume, so bracketing never reflows the bar
+            normal = "LvimRestTabInactive",
+            active = "LvimRestTabActive",
+            hover = "LvimRestTabHover",
+            hover_active = "LvimRestTabHover",
+        },
+    }
+end
 
 --- Build the header bar spec (view buttons + jq).
 ---@return table
@@ -173,6 +181,7 @@ local function header_spec()
         registry[v] = {
             name = v,
             active = state.view == v,
+            hl = tab_hl(),
             run = function()
                 set_view(v)
             end,
@@ -182,11 +191,31 @@ local function header_spec()
     registry.jq = {
         name = state.jq and ("jq: " .. state.jq) or "jq",
         active = state.jq ~= nil and state.jq ~= "",
+        hl = tab_hl(),
         run = function()
             M.filter()
         end,
     }
-    return { bars = { surface.bar({ group, { "jq" } }, registry, { align = "left" }) } }
+    group[#group + 1] = "jq"
+    -- ONE group (so no `●` sector separator between views and jq), CENTERED. The band keeps its default
+    -- `fill` — the full-width `LvimUiBarFill` strip, which IS the subtle YELLOW button-bar tint — so the row
+    -- reads as one yellow-tinted bar with the fg-only yellow buttons painted over it (the shared bar canon).
+    local tabbar = surface.bar({ group }, registry, { align = "center" })
+    return {
+        bars = {
+            -- The TITLE BAND: "RESULT" on the LEFT, `status · time` pushed to the RIGHT — a full-width
+            -- `title_counter` strip that deepens to blue while the dock has focus (the lvim-db result canon), so
+            -- the band reads edge-to-edge instead of only the old centred border-title.
+            {
+                title_counter = true,
+                text = title_left(),
+                count = range_text,
+                count_hl = "LvimUiPeekCounter",
+                title_pos = "left",
+            },
+            tabbar,
+        },
+    }
 end
 
 --- Switch the active view and re-render + rebuild the header (so the active button updates).
@@ -318,8 +347,12 @@ local function surface_cfg()
         end,
     }
     local cfg = {
-        title = title_box(),
-        content = { blocks = { { id = "response", provider = provider, border = surface.CONTENT_BORDER } } },
+        -- NO `title` on the surface: the title lives in the header's FIRST band (a `title_counter` strip — see
+        -- `header_spec`), so a separate centred border-title would only duplicate it.
+        -- `border = "none"` (NOT CONTENT_BORDER): the blank ring's 1-cell side inset is what stopped the blue
+        -- title band reaching the window edge — it filled the text area but not the gutter, so the band read as
+        -- "not fully blue". With no ring the band spans full width, edge-to-edge blue, keeping its own inner pad.
+        content = { blocks = { { id = "response", provider = provider, border = "none" } } },
         header = header_spec(),
         footer = footer_spec(),
         close_keys = { "q" },
@@ -411,11 +444,9 @@ function M.show(result, meta)
     if is_open() then
         render()
         if state.surface then
+            -- The title band lives INSIDE the header (its first bar), so refreshing the header re-renders it too.
             if state.surface.set_header then
                 pcall(state.surface.set_header, header_spec())
-            end
-            if state.surface.set_title then
-                pcall(state.surface.set_title, title_box())
             end
         end
         return
@@ -476,11 +507,9 @@ function M.toggle_layout()
             keep.result, keep.meta, keep.view, keep.jq, keep.oversized
         state.surface = surface.open(surface_cfg())
         if state.result and state.surface then
+            -- The title band lives INSIDE the header (its first bar), so refreshing the header re-renders it too.
             if state.surface.set_header then
                 pcall(state.surface.set_header, header_spec())
-            end
-            if state.surface.set_title then
-                pcall(state.surface.set_title, title_box())
             end
         end
         vim.notify("lvim-rest: dock layout → " .. new_state, vim.log.levels.INFO)

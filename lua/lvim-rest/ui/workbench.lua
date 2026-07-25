@@ -47,6 +47,116 @@ local function set_editor_title(win, text)
     vim.wo[win].winbar = "%=" .. text .. "%="
 end
 
+-- ── the editor footer button bar (lvim-ui.winfooter) ─────────────────────────
+-- The editor pane carries a bottom chip bar — send / save / send all / options — exactly like the lvim-db
+-- editor's footer. The chips are display + click; the keys themselves are the buffer-local maps installed by
+-- `attach_buffer` (init.lua), so the bar just mirrors them and every click routes through the SAME handler as
+-- the key. Each handler resolves the editor's CURRENT buffer/line, so it follows whichever request is open.
+
+--- A key's DISPLAY form for the footer chips: `<localleader>` → the user's real local leader (space reads
+--- "SPC"), `<CR>` → the return glyph — so a chip shows the key a finger presses, not the mapping notation.
+---@param lhs string?
+---@return string?
+local function pretty_key(lhs)
+    if type(lhs) ~= "string" or lhs == "" then
+        return nil
+    end
+    local ll = vim.g.maplocalleader or "\\"
+    if ll == " " then
+        ll = "SPC "
+    end
+    local lead = vim.g.mapleader or "\\"
+    if lead == " " then
+        lead = "SPC "
+    end
+    return (lhs:gsub("<localleader>", ll):gsub("<leader>", lead):gsub("<[Cc]%-CR>", "⌃⏎"):gsub("<CR>", "⏎"))
+end
+
+---@type table?  the attached footer-bar handle (an LvimUiWinFooter; closed with its window)
+local footer_handle = nil
+
+--- The editor window's current buffer + cursor line, for a footer handler to act on the open request.
+---@return integer? buf, integer line
+local function editor_target()
+    local win = M.editor_win()
+    if not (win and api.nvim_win_is_valid(win)) then
+        return nil, 1
+    end
+    return api.nvim_win_get_buf(win), api.nvim_win_get_cursor(win)[1]
+end
+
+--- The editor footer chips, from the LIVE `config.keys` (a key left empty drops its chip). Display + click
+--- only — each `run` calls the same code the buffer-local key does.
+---@return table[]
+local function footer_items()
+    local surface = require("lvim-ui.surface")
+    local k = config.keys
+    local defs = {
+        {
+            key = k.send,
+            name = "send",
+            run = function()
+                local buf, line = editor_target()
+                if buf then
+                    require("lvim-rest.runner").send(buf, line)
+                end
+            end,
+        },
+        {
+            key = k.save,
+            name = "save",
+            run = function()
+                local buf = editor_target()
+                if buf and bind.request_of(buf) then
+                    bind.write_back(buf)
+                end
+            end,
+        },
+        {
+            key = k.send_all,
+            name = "send all",
+            run = function()
+                local buf = editor_target()
+                if buf then
+                    require("lvim-rest.runner").send_all(buf)
+                end
+            end,
+        },
+        {
+            key = k.options,
+            name = "options",
+            run = function()
+                local buf, line = editor_target()
+                if buf then
+                    require("lvim-rest.ui.options").open(buf, line)
+                end
+            end,
+        },
+    }
+    local items = {}
+    for _, d in ipairs(defs) do
+        local disp = pretty_key(d.key)
+        if disp then
+            items[#items + 1] = surface.button({ name = d.name, key = disp, style = "action", run = d.run }, "action")
+        end
+    end
+    return items
+end
+
+--- Attach (or re-attach) the footer chip bar to the editor window. The bar auto-closes with its window, so a
+--- re-open just attaches a fresh one; safe to call on every open/show.
+---@param win integer?
+local function attach_footer(win)
+    if not (win and api.nvim_win_is_valid(win)) then
+        return
+    end
+    if footer_handle then
+        pcall(footer_handle.close)
+        footer_handle = nil
+    end
+    footer_handle = require("lvim-ui.winfooter").attach(win, { items = footer_items(), align = "center" })
+end
+
 --- The placeholder shown in the editor pane before a request is opened — it tells you what to press.
 ---@return string[]
 local function placeholder()
@@ -55,9 +165,11 @@ local function placeholder()
         "#",
         "#   <CR>  open the request under the cursor in the library",
         "#   S     send it        X  run the whole collection",
-        "#   ?     every key the library panel has",
+        "#   g?    every key the library panel has",
         "#",
-        "# Requests are stored in the library — this buffer writes back on :w.",
+        ("# Requests live in the library database — edit here and save with %s (no file on disk)."):format(
+            config.keys.save or "<localleader>w"
+        ),
     }
 end
 
@@ -107,6 +219,7 @@ function M.open()
     -- Blue title band on the editor pane (the tree + response dock carry their own) — until a request is
     -- opened it reads "EDITOR", then the request name (see `show_request`).
     set_editor_title(M.editor_win(), "EDITOR")
+    attach_footer(M.editor_win()) -- the bottom chip bar: send / save / send all / options
     return true
 end
 
@@ -128,6 +241,7 @@ function M.show_request(id)
     -- The editor title band names the open request (from its `### <name>` first line).
     local row = require("lvim-rest.store.library").request(id)
     set_editor_title(win, "  " .. ((row and row.name) or "request") .. "  ")
+    attach_footer(win) -- keep the chip bar riding the (possibly re-resolved) editor window
     return true
 end
 

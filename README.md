@@ -37,7 +37,8 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
 - **The request library (sqlite)** — workspaces ▸ collections ▸ nested folders ▸ requests, with
   examples, environments and run history, stored in the same sqlite database as the history.
   Reorderable (`ord` is persisted), and each request opens as an ordinary `.http` buffer bound to its
-  row: `:w` re-parses it and updates the record, so the request *builder* is just the editor.
+  row: the save key (`<localleader>w`) re-parses it and updates the record, so the request *builder* is
+  just the editor. (The buffer is a nameless scratch, not a file — there is nothing on disk to `:w`.)
 - **The workbench** — `:LvimRest` opens a tab of its own with the library tree beside the request
   editor and a persistent response dock, and focuses the tree — one coherent full-tab client, like
   `:LvimDb`. `:LvimRest dock` toggles between two layouts (editor-over-response on the right with a
@@ -233,8 +234,8 @@ in a loose `.http` file and in a request opened from the library alike.
 row is built from a fresh parse of the buffer and every change is written back as buffer TEXT, one
 line at a time. So a line the form did not touch is byte-identical afterwards — your comments, your
 blank lines and any `# @directive` this plugin does not understand are never rewritten or reordered.
-A request opened from the library is edited the same way, through its bound buffer, and `:w` persists
-it exactly as a hand edit does; the form never writes to the database itself.
+A request opened from the library is edited the same way, through its bound buffer, and the save key
+(`<localleader>w`) persists it exactly as a hand edit does; the form never writes to the database itself.
 
 Two consequences worth knowing:
 
@@ -470,6 +471,7 @@ require("lvim-rest").setup({
     inline_status = true,
     keys = { -- buffer-local maps on http/rest buffers (all configurable)
         send = "<CR>",
+        save = "<localleader>w", -- save a library-bound request back to its row (no `:w` on the scratch)
         send_all = "<leader>ra",
         replay = "<leader>rr",
         cancel = "<leader>rx",

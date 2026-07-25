@@ -70,6 +70,16 @@ local function attach_buffer(bufnr)
     map(k.send, function()
         runner.send(bufnr, vim.api.nvim_win_get_cursor(0)[1])
     end, "send request")
+    map(k.save, function()
+        -- A LIBRARY-bound buffer is a nameless `nofile` scratch (no `:w`); saving re-parses it back onto its
+        -- row. A loose `.http` file on disk keeps the ordinary `:w` semantics.
+        local bind = require("lvim-rest.store.bind")
+        if bind.request_of(bufnr) then
+            bind.write_back(bufnr)
+        else
+            vim.cmd.write()
+        end
+    end, "save request")
     map(k.send_all, function()
         runner.send_all(bufnr)
     end, "send all")

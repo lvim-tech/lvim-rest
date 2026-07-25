@@ -44,6 +44,14 @@ function M.build()
         LvimRestStatus4xx = { fg = c.orange, bold = true },
         LvimRestStatus5xx = { fg = c.red, bold = true },
 
+        -- Response dock view-tab bar (body / headers / … / jq) — the lvim-installer TOOLBAR canon: a YELLOW
+        -- family, fg-ONLY (no background). The open view reads light-yellow-bold, the rest a dimmer yellow, and
+        -- the keyboard cursor braces the hovered tab in `[ ]` (drawn by ui.button — these groups carry no bg, so
+        -- the brackets ARE the hover affordance, not doubled by a tint).
+        LvimRestTabInactive = { fg = mtint(c.yellow, 0.6) }, -- not selected: dim yellow
+        LvimRestTabActive = { fg = c.yellow, bold = true }, -- the open view: light yellow bold
+        LvimRestTabHover = { fg = c.yellow, bold = true }, -- the cursor (+ `[ ]` brackets), fg-only
+
         -- Header view: dim name, normal value.
         LvimRestHeaderName = { fg = mtint(c.fg, 0.6) },
         LvimRestHeaderValue = { fg = c.fg },

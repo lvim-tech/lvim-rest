@@ -100,6 +100,7 @@
 
 ---@class LvimRestKeys
 ---@field send           string  Send the request under the cursor
+---@field save           string  Save the edited request back to its library row
 ---@field send_all       string  Send every request in the buffer
 ---@field replay         string  Replay the last request
 ---@field cancel         string  Cancel in-flight request(s)
@@ -260,6 +261,7 @@ return {
     inline_status = true,
     keys = {
         send = "<CR>",
+        save = "<localleader>w", -- save the edited request back to the library (the `nofile` buffer has no `:w`)
         send_all = "<leader>ra",
         replay = "<leader>rr",
         cancel = "<leader>rx",

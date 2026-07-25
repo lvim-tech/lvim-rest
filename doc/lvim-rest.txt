@@ -354,10 +354,11 @@ sqlite database as the history:
 
   workspace  >  collection  >  folder (nestable)  >  request
 
-Each request opens as an ordinary `.http` buffer BOUND to its row: `:w` does
-not write a file, it re-parses the buffer and updates the record. So the
-request builder is just the editor — treesitter highlighting, the send maps
-and variable completion all work exactly as they do for a real `.http` file.
+Each request opens as an ordinary `.http` buffer BOUND to its row — a nameless
+scratch, not a file. The save key (`<localleader>w`) re-parses the buffer and
+updates the record. So the request builder is just the editor — treesitter
+highlighting, the send maps and variable completion all work exactly as they
+do for a real `.http` file.
 
 Secrets never reach the database: a save that would store a secret-shaped
 value either moves it into lvim-keyring and rewrites it to `{{vault "key"}}`
@@ -476,7 +477,7 @@ SAVE INTO A COLLECTION ~
 for the collection, the folder and a name. The document's own `@var` lines are
 carried along as request-local variables, so the stored request runs on its
 own without the document around it. A request that is ALREADY bound to a
-library row is not duplicated — `:w` updates it.
+library row is not duplicated — the save key (`<localleader>w`) updates it.
 
 ==============================================================================
 14. COMMANDS                                             *lvim-rest-commands*
@@ -537,8 +538,8 @@ is written back as buffer TEXT, one line at a time. A line the form did not
 touch is byte-identical afterwards — comments, blank lines and any
 `# @directive` this plugin does not understand are never rewritten or
 reordered. A request opened from the library is edited through its bound
-buffer, and `:w` persists it exactly as a hand edit does; the form never
-writes to the database itself.
+buffer, and the save key (`<localleader>w`) persists it exactly as a hand edit
+does; the form never writes to the database itself.
 
 Switching a HEADER off comments its line out (`# X-Trace: 1`) — the text
 survives and `t` brings it back; the row renders dimmed and struck through. A
@@ -551,6 +552,7 @@ pretend: edit, add and delete are the operations it offers.
 Buffer-local on `http` / `rest` buffers (all configurable via `keys`):
 
   <CR>          send the request under the cursor
+  <localleader>w  save a library-bound request back to its row
   <leader>ra    send all
   <leader>rr    replay last
   <leader>rx    cancel
