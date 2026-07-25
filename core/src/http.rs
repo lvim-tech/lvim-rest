@@ -43,7 +43,10 @@ fn default_true() -> bool {
 /// Normalise reqwest's `{:?}` version ("HTTP/2.0") to the bare number ("2").
 fn version_str(v: reqwest::Version) -> String {
     let s = format!("{:?}", v);
-    s.strip_prefix("HTTP/").unwrap_or(&s).trim_end_matches(".0").to_string()
+    s.strip_prefix("HTTP/")
+        .unwrap_or(&s)
+        .trim_end_matches(".0")
+        .to_string()
 }
 
 /// Handle one `http.send`, emitting the response (or an error) for `id`.
@@ -55,7 +58,10 @@ pub async fn send(id: i64, p: HttpParams, writer: Writer) {
 }
 
 async fn run(p: &HttpParams) -> anyhow::Result<serde_json::Value> {
-    let mut cb = reqwest::Client::builder().cookie_store(true);
+    // No cookie store here (reqwest has none by default, and the `cookies` feature is off): the Lua
+    // side owns ONE jar for both engines — see `lvim-rest.cookies` — and a second store would send
+    // cookies the jar had already dropped.
+    let mut cb = reqwest::Client::builder();
     if !p.follow_redirects {
         cb = cb.redirect(reqwest::redirect::Policy::none());
     }
@@ -73,8 +79,10 @@ async fn run(p: &HttpParams) -> anyhow::Result<serde_json::Value> {
     }
     let client = cb.build()?;
 
+    // A method the HTTP grammar does not accept is an error, not a GET: silently sending a
+    // different verb than the document asked for is the one answer that cannot be debugged.
     let method = reqwest::Method::from_bytes(p.method.to_uppercase().as_bytes())
-        .unwrap_or(reqwest::Method::GET);
+        .map_err(|_| anyhow::anyhow!("{:?} is not a valid HTTP method", p.method))?;
     let mut rb = client.request(method, &p.url);
     for (k, v) in &p.headers {
         rb = rb.header(k.as_str(), v.as_str());

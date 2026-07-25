@@ -1,7 +1,8 @@
 -- lvim-rest.vars: the variable-resolution pipeline + `{{…}}` substitution.
 --
 -- Resolution order (first hit wins), per the plan's `.http` face:
---   prompt > request-local > document > env file > {{$processEnv}} / {{$dotenv}} > dynamic > vault
+--   data (runner iteration) > prompt > request-local > document > env file > {{$processEnv}} /
+--   {{$dotenv}} > dynamic > vault
 -- A plain `{{name}}` is looked up through the scope chain; a prefixed token (`{{$uuid}}`,
 -- `{{$processEnv X}}`, `{{$dotenv X}}`, `{{vault "k"}}`, `{{name.response.…}}`) is dispatched to
 -- its resolver. An UNRESOLVED token is left verbatim (never silently blanked) so a missing
@@ -13,10 +14,13 @@
 
 local dynamic = require("lvim-rest.vars.dynamic")
 local env = require("lvim-rest.vars.env")
+local script = require("lvim-rest.runner.script")
 
 local M = {}
 
 ---@class LvimRestVarContext
+---@field data          table<string, string>  the collection runner's iteration row (top priority)
+---@field globals       table<string, string>  session values set by `client.global.set` in a script
 ---@field prompts       table<string, string>  interactive `# @prompt` values (phase 4)
 ---@field request_local table<string, string>
 ---@field document      table<string, string>
@@ -39,15 +43,18 @@ end
 --- Build the resolution context for one request in a document.
 ---@param doc LvimRestDocument
 ---@param req LvimRestRequest?
----@param opts { path?: string, prompts?: table<string,string>, chain?: table }?
+---@param opts { path?: string, prompts?: table<string,string>, chain?: table, data?: table<string,string> }?
 ---@return LvimRestVarContext
 function M.build_context(doc, req, opts)
     opts = opts or {}
     local path = opts.path or vim.api.nvim_buf_get_name(0)
     return {
+        -- one iteration row of a data-driven collection run (nil for an ordinary send)
+        data = opts.data or {},
         prompts = opts.prompts or {},
         request_local = req and to_map(req.vars) or {},
         document = to_map(doc and doc.vars),
+        globals = script.globals(),
         env = env.active_vars(path),
         dotenv = env.dotenv(path),
         chain = opts.chain,
@@ -141,7 +148,12 @@ local function resolve_token(expr, ctx, seen)
     if cname then
         return resolve_chain(ctx, cname, ckind, csel)
     end
-    for _, scope in ipairs({ "prompts", "request_local", "document", "env" }) do
+    -- `data` is the COLLECTION-RUNNER iteration row and outranks everything: a data-driven run is
+    -- explicitly saying "for this pass, these are the values" (Postman's data variables win too).
+    -- `globals` (set by a script with `client.global.set`) sit BELOW what the document says literally
+    -- and ABOVE the environment file — a captured token overrides the env default, but a value typed
+    -- into the document still wins over one a script left behind earlier in the session.
+    for _, scope in ipairs({ "data", "prompts", "request_local", "document", "globals", "env" }) do
         local v = ctx[scope] and ctx[scope][expr]
         if v ~= nil then
             if seen[expr] then

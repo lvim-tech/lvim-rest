@@ -10,12 +10,19 @@ CONTENTS                                                          *lvim-rest*
   5. Environments ........................... |lvim-rest-environments|
   6. Execution engines ...................... |lvim-rest-engines|
   7. The response dock ...................... |lvim-rest-dock|
-  8. Commands ............................... |lvim-rest-commands|
-  9. Keymaps ................................ |lvim-rest-keymaps|
-  10. Configuration ......................... |lvim-rest-config|
-  11. Health ................................ |lvim-rest-health|
-  12. Highlights ............................ |lvim-rest-highlights|
-  13. Roadmap ............................... |lvim-rest-roadmap|
+  8. Authentication ......................... |lvim-rest-auth|
+  9. gRPC and WebSocket ..................... |lvim-rest-protocols|
+  10. Scripting and tests ................... |lvim-rest-scripting|
+  11. The library and workbench ............. |lvim-rest-library|
+  12. The collection runner ................. |lvim-rest-runner|
+  13. Import and export ..................... |lvim-rest-convert|
+  14. Commands .............................. |lvim-rest-commands|
+  14a. The request options form ............. |lvim-rest-options|
+  15. Keymaps ............................... |lvim-rest-keymaps|
+  16. Configuration ......................... |lvim-rest-config|
+  17. Health ................................ |lvim-rest-health|
+  18. Highlights ............................ |lvim-rest-highlights|
+  19. Roadmap ............................... |lvim-rest-roadmap|
 
 ==============================================================================
 1. INTRODUCTION                                             *lvim-rest-intro*
@@ -61,11 +68,18 @@ come from a file (`< ./payload.json`, or `<@ ./file` to substitute variables in
 the included file); the response may be saved with `>> ./out.json` (`>>!`
 overwrites). Comments are `#` or `//`.
 
+Script blocks attach to a request: `< {% … %}` before the request line runs
+before it is sent, `> {% … %}` after the body runs on the response — see
+|lvim-rest-scripting|.
+
 Metadata directives (`# @…` on a request): >
   # @name id            chain / replay id (also set from the ### label)
   # @prompt var [desc]   interactive input, asked before send
   # @timeout ms          per-request timeout
   # @no-log              keep out of history
+  # @auth scheme [args]  authentication (see |lvim-rest-auth|)
+  # @grpc-proto file     a .proto describing a gRPC call
+  # @grpc-import dir     an include path for it
   # @no-cookie-jar       opt out of the cookie jar
   # @accept chunked      stream mode
   # @jq expr             auto-filter the response body
@@ -77,15 +91,17 @@ Metadata directives (`# @…` on a request): >
 
 Variables are written `{{name}}`. Resolution order, first hit wins:
 
-  1. prompt              # @prompt var
-  2. request-local       @var = value inside a request block
-  3. document            @var = value before the first request
-  4. environment file    http-client.env.json active profile
-  5. {{$processEnv VAR}}  an OS environment variable
-  6. {{$dotenv VAR}}      a value from a discovered .env
-  7. dynamic             {{$uuid}} {{$timestamp}} {{$isoTimestamp}}
+  1. data                the collection runner's iteration row, when a run
+                         was given a data file (see |lvim-rest-runner|)
+  2. prompt              # @prompt var
+  3. request-local       @var = value inside a request block
+  4. document            @var = value before the first request
+  5. environment file    http-client.env.json active profile
+  6. {{$processEnv VAR}}  an OS environment variable
+  7. {{$dotenv VAR}}      a value from a discovered .env
+  8. dynamic             {{$uuid}} {{$timestamp}} {{$isoTimestamp}}
                          {{$date [fmt]}} {{$randomInt [min max]}}
-  8. {{vault "key"}}      an lvim-keyring secret
+  9. {{vault "key"}}      an lvim-keyring secret
 
 Chained values reference a previous run of a named request:
 `{{name.response.body.$.path}}`, `{{name.response.headers.X}}`,
@@ -142,25 +158,386 @@ copy-as-curl / replay / close. An oversized body (`format.max_size`) is diverted
 to a scratch file and the dock shows the notice + the headers/stats views.
 
 ==============================================================================
-8. COMMANDS                                              *lvim-rest-commands*
+8. AUTHENTICATION                                            *lvim-rest-auth*
+
+`# @auth <scheme> [args…]` on a request. Four schemes resolve instantly: >
+
+  # @auth basic {{user}} {{password}}
+  # @auth bearer {{token}}
+  # @auth apikey X-Api-Key {{key}}       # header (default)
+  # @auth apikey api_key {{key}} query   # …or a query parameter
+  # @auth none                           # opt out
+<
+The arguments are ordinary variables and are resolved with the request.
+
+                                                          *lvim-rest-oauth2*
+The fifth is OAuth 2.0, and it names a profile in the environment file: >
+
+  # @auth oauth2 myapi
+<
+Profiles live under `Security.Auth.<id>` — the shape the JetBrains HTTP client
+uses, so an existing project's env file needs no second copy: >
+
+  {
+    "dev": {
+      "Security": {
+        "Auth": {
+          "myapi": {
+            "Grant Type": "authorization_code",
+            "Auth URL":  "https://id.example.com/authorize",
+            "Token URL": "https://id.example.com/token",
+            "Client ID": "abc",
+            "Client Secret": "{{vault \"example/client-secret\"}}",
+            "Scope": "openid profile",
+            "PKCE": true
+          }
+        }
+      }
+    }
+  }
+<
+Field names are matched loosely: `"Token URL"`, `"token_url"` and `"tokenUrl"`
+are the same key. The grants are `client_credentials`, `password`,
+`refresh_token` and `authorization_code`. The last opens the browser and waits
+for the redirect on a loopback listener that answers exactly ONE request and
+closes; PKCE (S256) is on unless the profile sets `"PKCE": false`, and the
+`state` value is checked on the way back.
+
+A cached token is used until `auth.oauth2.leeway` seconds before it expires,
+then a refresh is tried, and the grant is only re-run if that fails. Tokens are
+SECRETS: they go to lvim-keyring, and the database stores only the expiry — so
+a token survives a restart when the wallet is available and simply is not
+cached when it is not. `:LvimRest auth` shows the profiles and what is cached;
+`:LvimRest auth clear` forgets every token.
+
+An `Authorization` header written in the document always wins.
+
+==============================================================================
+9. gRPC AND WEBSOCKET                                   *lvim-rest-protocols*
+
+Both are DAEMON-ONLY: curl can neither speak gRPC nor hold a duplex connection
+open, so there is nothing to fall back to and the plugin says so before trying.
+
+                                                            *lvim-rest-grpc*
+A gRPC request puts the endpoint AND the method in the url; the headers are
+metadata and the body is the request message as JSON: >
+
+  ### unary call
+  GRPC 127.0.0.1:50051/demo.Greeter/SayHello
+  X-Token: {{token}}
+
+  { "name": "ana", "times": 2 }
+<
+`package.Service/Method` and `package.Service.Method` both work. Message types
+are discovered at CALL TIME, from either source:
+
+  • the server's REFLECTION service (v1, falling back to v1alpha), or
+  • a `.proto` named on the request and compiled in-process — no `protoc`
+    binary has to exist: >
+
+  # @grpc-proto greet.proto
+  # @grpc-import ./protos
+  GRPC 127.0.0.1:50051/demo.Greeter.Add
+
+  { "a": 40, "b": 2 }
+<
+`:LvimRest grpc [host:port]` lists a server's methods (defaulting to the
+endpoint of the request under the cursor) and writes the chosen one at the
+cursor. Unary calls only — a streaming method has no single response, which is
+what the WebSocket session model below is for.
+
+                                                              *lvim-rest-ws*
+A WEBSOCKET request OPENS a session rather than getting a reply: >
+
+  WEBSOCKET ws://127.0.0.1:8080/chat
+  Sec-WebSocket-Protocol: chat
+<
+Frames stream into the response dock as they arrive, in send order, inbound and
+outbound in one list. `:LvimRest ws <text>` sends a frame on the current
+session, `:LvimRest ws close` closes it, and a bare `:LvimRest ws` lists the
+sessions and switches which one the dock shows. `ws.max_messages` caps a
+session's log so a chatty stream cannot become the only thing in memory.
+
+==============================================================================
+10. SCRIPTING AND TESTS                                 *lvim-rest-scripting*
+
+A request may carry a PRE-REQUEST script (before it is sent) and a
+POST-RESPONSE script (after the response arrives): >
+
+  ### login
+  < {%
+    request.headers["X-Trace"] = "abc"
+  %}
+  POST https://api.example.com/login
+  Content-Type: application/json
+
+  {"user":"ana"}
+
+  > {%
+    client.test("logged in", function()
+        client.assert(response.status == 200)
+    end)
+    client.global.set("token", response.json.token)
+  %}
+<
+A script may also live in a file: `< ./setup.lua` before the request line and
+`> ./check.lua` after the body, resolved relative to the document. (In the
+BODY, `< ./file` is still the body-include — position tells the two apart.)
+
+The language is LUA, not JavaScript: the editor's host language is already
+Lua, so there is no engine to ship and you write what you configure Neovim in.
+
+Pre-request scripts see `request` and may change it: >
+
+  request.method                 the verb
+  request.url                    the raw URL (variables still resolve after)
+  request.body                   the raw body
+  request.headers["Name"]        case-insensitive read / write / remove
+  request.variables.set(n, v)    set a request-local variable
+<
+Post-response scripts see `response`: >
+
+  response.status                the status code
+  response.status_text           its reason phrase
+  response.body                  the raw body
+  response.json                  the body decoded (nil when it is not json)
+  response.headers["Name"]       case-insensitive lookup
+  response.content_type          the Content-Type header
+  response.timing                { total, dns, connect, tls, ttfb } in ms
+<
+Both see `client`: >
+
+  client.test(name, fn)          a named test; a failure never stops the rest
+  client.assert(cond, message)   fail the enclosing test
+  client.log(...)                a line in the dock's script view
+  client.global.set(name, value) a value that resolves as {{name}} later
+  client.global.get(name)        read one back
+  client.global.clear(name)      drop one    (clear_all drops every global)
+<
+Globals live for the SESSION, like the prompt cache, and resolve below the
+document's own `@var` lines and above the environment file
+(see |lvim-rest-variables|).
+
+The sandbox holds the standard-library subset (`string`, `table`, `math`,
+`pcall`, …) plus the objects above — no `require`, `io` or `os.execute`.
+
+Test results become the dock's `report` view and `client.log` output its
+`script` view. `scripts.show_report` decides when the report opens by itself:
+"on_failure" (the default), "always", or "never". `scripts.enabled = false`
+turns the whole layer off.
+
+                                                         *lvim-rest-cookies*
+COOKIES ~
+
+Responses' `Set-Cookie` headers go into a persistent jar and are sent back on
+matching requests. The jar lives in Lua and is applied by the runner, so BOTH
+execution engines send the same thing — a request cannot behave differently
+because the daemon happened to be built. It is stored in the plugin's sqlite
+DB and `:LvimRest cookies` lists it (choosing a row drops that domain's
+cookies; `:LvimRest cookies clear` empties it).
+
+Matching is the practical RFC 6265 subset: the host or a domain suffix (for a
+`Domain=` cookie), a path prefix, `Secure` only over https, and expiry checked
+on read; longer paths are sent first. A `Cookie:` header you wrote yourself
+always wins — the document is more specific than the jar — and
+`# @no-cookie-jar` opts a request out of both reading and writing.
+
+Session cookies (no `Expires`/`Max-Age`) are dropped when Neovim starts: an
+editor session is the session they belong to. `cookies.enabled = false` turns
+the jar off entirely.
+
+==============================================================================
+11. THE LIBRARY AND WORKBENCH                              *lvim-rest-library*
+
+Requests do not have to live in a file. The library stores them in the same
+sqlite database as the history:
+
+  workspace  >  collection  >  folder (nestable)  >  request
+
+Each request opens as an ordinary `.http` buffer BOUND to its row: `:w` does
+not write a file, it re-parses the buffer and updates the record. So the
+request builder is just the editor — treesitter highlighting, the send maps
+and variable completion all work exactly as they do for a real `.http` file.
+
+Secrets never reach the database: a save that would store a secret-shaped
+value either moves it into lvim-keyring and rewrites it to `{{vault "key"}}`
+(with `vault.auto = true`), or is REFUSED with the offending fields named.
+
+                                                       *:LvimRest workbench*
+`:LvimRest workbench` opens a tab of its own — the library tree beside the
+request editor. `:LvimRest library` instead docks just the tree as a sidebar
+next to whatever you are already doing; both host the SAME tree, so folds stay
+where you left them.
+
+Keys in the tree: >
+
+  <CR>      open the request under the cursor in the editor
+  S         send it
+  X         run the whole collection (on a folder: just that subtree)
+  a A n     new request / folder / collection
+  r d       rename / delete
+  ]e [e     move the item among its siblings
+  w         switch workspace
+  R         refresh
+  ?         a window listing every key the panel has
+<
+The footer carries the everyday actions as clickable chips; the rest are keys,
+because a bar that overflows into chevrons hides more than it shows.
+
+The panel is a SINGLETON — `:LvimRest library` while the workbench is open
+focuses the library pane there rather than opening a second copy, and the fold
+state survives closing and reopening it.
+
+==============================================================================
+12. THE COLLECTION RUNNER                                   *lvim-rest-runner*
+
+                                                             *:LvimRest run*
+A run walks the collection in the order the tree shows it — a folder's own
+requests first, then its sub-folders, each by its persisted order — and it is
+SEQUENTIAL on purpose: requests routinely depend on the ones before them (log
+in, capture a token, use it). Each request goes through the same send path an
+interactive `<CR>` uses, so chaining, scripts, variables, cookies and history
+behave identically in a run and in a single send.
+
+To run the same requests against many inputs, pass a data file: >vim
+
+  :LvimRest run ./users.csv
+<
+A csv's first line is the header (quoted fields may contain commas); a json
+file is an array of objects. Each row becomes ONE ITERATION and its keys enter
+the top-priority `data` variable scope (see |lvim-rest-variables|), so a
+stored `POST /users/{{id}}` sends one request per row.
+
+Every run is persisted — start and end, the iteration count, and per request
+the status, duration and pass/fail. A response outside 2xx/3xx counts as a
+failure; with `library.runner.stop_on_failure` the run stops after the first.
+
+Only one run is in flight at a time; a second is refused rather than queued.
+
+==============================================================================
+13. IMPORT AND EXPORT                                     *lvim-rest-convert*
+
+`:LvimRest import [format]` (a picker when no format is given):
+
+  postman   a Postman collection v2.1 — or an ENVIRONMENT export, which is
+            recognised by its `values` array rather than rejected
+  openapi   OpenAPI 3.x / Swagger 2.0
+  har       a HAR recording
+  curl      a pasted curl command, inserted at the cursor
+
+`:LvimRest export` writes a stored collection back out as Postman v2.1. A
+round-trip through this plugin keeps the folders, headers, bodies, auth,
+examples, variables and scripts.
+
+                                                       *lvim-rest-scripts-js*
+Postman `event` scripts are JavaScript and this plugin's are Lua, so they are
+NEVER translated: an imported script is preserved verbatim in the request's
+docs, clearly labelled and not executed — translating it would produce a
+request that fails the moment it runs. Exported Lua scripts go out as events
+typed `text/lua`, so they survive a round-trip here and Postman simply does
+not run them.
+
+A collection-level auth scheme is INHERITED by a request that declares none.
+It is rendered into the request's document form rather than applied invisibly,
+so you can see what will be sent and override it by editing the line.
+
+OPENAPI ~
+One request per operation, a folder per tag. The server url becomes a
+`{{baseUrl}}` collection variable (its own template variables resolved from
+their defaults); path parameters become request-local variables so
+`/pets/{petId}` is `/pets/{{petId}}` with `petId` declared; required query
+parameters are appended empty; a JSON request body is generated from the
+schema. A `$ref` is left as a marker rather than resolved — a wrong guess
+would produce a body that looks right and is not.
+
+A YAML spec is converted with `yq` when it is installed, and otherwise refused
+with instructions: a hand-rolled YAML parser that is subtly wrong would
+silently import a wrong API.
+
+HAR ~
+Requests are grouped into a folder per host and each RECORDED RESPONSE is
+attached as an example — a recording's whole value is that it says what came
+back. The headers a recording carries but a client must not resend (`Host`,
+`Content-Length`, `Connection`, HTTP/2 pseudo-headers) are dropped.
+
+                                                            *:LvimRest save*
+SAVE INTO A COLLECTION ~
+`:LvimRest save` puts the request under the cursor into the library, asking
+for the collection, the folder and a name. The document's own `@var` lines are
+carried along as request-local variables, so the stored request runs on its
+own without the document around it. A request that is ALREADY bound to a
+library row is not duplicated — `:w` updates it.
+
+==============================================================================
+14. COMMANDS                                             *lvim-rest-commands*
 
                                                               *:LvimRest*
 :LvimRest                 print status (engine, in-flight count, subcommands)
+:LvimRest workbench       toggle the full-tab workbench (library + editor)
+:LvimRest library         dock the library tree as a sidebar
+:LvimRest run [datafile]  run the collection, once per data-file row
 :LvimRest send            send the request under the cursor
 :LvimRest all             send every request in the buffer
 :LvimRest replay          replay the last request
 :LvimRest cancel          cancel in-flight requests
 :LvimRest inspect         show the fully resolved request (secrets masked)
+:LvimRest options [lay]   the request options form (|lvim-rest-options|); the
+                          optional token is float|area|bottom
 :LvimRest env [name]      switch the active environment
 :LvimRest history         the request-history picker
-:LvimRest import [curl]   import a pasted curl command at the cursor
+:LvimRest cookies         list the cookie jar (`clear` empties it)
+:LvimRest auth            OAuth2 profiles (`clear` forgets cached tokens)
+:LvimRest grpc [host]     list a gRPC server's methods, insert one
+:LvimRest ws [text]       websocket sessions (`close` ends the current one)
+:LvimRest import [fmt]    import postman / openapi / har / curl
+:LvimRest export          export a collection as Postman v2.1
+:LvimRest save            save the request under the cursor into the library
 :LvimRest scratch         open a persistent scratch .http buffer
 :LvimRest next            jump to the next request
 :LvimRest prev            jump to the previous request
 :LvimRest close           close the response dock
 
 ==============================================================================
-9. KEYMAPS                                                *lvim-rest-keymaps*
+14a. THE REQUEST OPTIONS FORM                              *lvim-rest-options*
+
+`:LvimRest options` (or `<leader>ro`) opens a form over the request under the
+cursor — in a loose `.http` file and in a request opened from the library
+alike. Three tabs:
+
+  Params     one row per query parameter of the request line
+  Headers    one row per header LINE, including the ones commented out
+  Settings   @timeout, @no-log, @no-cookie-jar, @accept, @jq, a fold per
+             repeatable directive (@prompt, @stdin-cmd, @env-stdin-cmd,
+             @curl-*), and a read-only fold of the directives lvim-rest does
+             not know
+
+Keys (all configurable under `ui.options.keys`):
+
+  <CR>   edit the focused row's value
+  a      add a parameter / header / directive entry
+  d      delete the row under the cursor
+  t      switch a header line off / on
+  r      rename a parameter / header
+  s      send this request and close
+  ?      the key help
+  h / l  switch tab           q  close
+
+THE DOCUMENT IS THE SINGLE SOURCE OF TRUTH. The form is a VIEW over the parsed
+request: every row is built from a fresh parse of the buffer, and every change
+is written back as buffer TEXT, one line at a time. A line the form did not
+touch is byte-identical afterwards — comments, blank lines and any
+`# @directive` this plugin does not understand are never rewritten or
+reordered. A request opened from the library is edited through its bound
+buffer, and `:w` persists it exactly as a hand edit does; the form never
+writes to the database itself.
+
+Switching a HEADER off comments its line out (`# X-Trace: 1`) — the text
+survives and `t` brings it back; the row renders dimmed and struck through. A
+query PARAMETER has no "off" (a url cannot express one), so the form does not
+pretend: edit, add and delete are the operations it offers.
+
+==============================================================================
+15. KEYMAPS                                                *lvim-rest-keymaps*
 
 Buffer-local on `http` / `rest` buffers (all configurable via `keys`):
 
@@ -169,19 +546,35 @@ Buffer-local on `http` / `rest` buffers (all configurable via `keys`):
   <leader>rr    replay last
   <leader>rx    cancel
   <leader>ri    inspect resolved request
+  <leader>ro    the request options form
   ]r / [r       next / previous request
+  <leader>rs    save the request into a collection
+  <leader>rc    the library tree
+  <leader>rR    run a collection
 
 ==============================================================================
-10. CONFIGURATION                                          *lvim-rest-config*
+16. CONFIGURATION                                          *lvim-rest-config*
 
 See the README for the full default `setup()` block; it is kept in sync with
 `lua/lvim-rest/config.lua`. Notable keys: `backend`, `daemon`, `dock.layout`,
-`default_view`, `env`, `request` (timeout / redirects / http_version / chain),
-`format` (indent / jq_bin / xmllint_bin / max_size), `vault`, `history`,
-`scrub_secrets`, `prompt.cache`, `inline_status`, `keys`, `icons`.
+`default_view`, `env`, `request` (timeout / redirects / http_version /
+send_all_delay / chain), `format` (indent / jq_bin / xmllint_bin / max_size),
+`library`, `vault`, `history`, `scrub_secrets`, `prompt.cache`,
+`inline_status`, `keys`, `icons`.
+
+  daemon.autostart        Spawn the daemon on first use. `false` = never spawn
+                          it: HTTP/GraphQL run on curl and the daemon-only
+                          protocols (gRPC, WebSocket) report that it is off.
+  daemon.idle_timeout     Stop an idle daemon after this many ms (0 = never).
+                          An open WebSocket session keeps it alive.
+  env.scope               "project" remembers the active environment per
+                          project root; "buffer" remembers it per file.
+  request.send_all_delay  Pause between requests in `:LvimRest all`. The
+                          collection runner has its own `library.runner.delay`.
+  library.confirm_delete  Ask before deleting a library item.
 
 ==============================================================================
-11. HEALTH                                                 *lvim-rest-health*
+17. HEALTH                                                 *lvim-rest-health*
 
 `:checkhealth lvim-rest` reports the active engine (daemon / curl), the optional
 tools (jq, xmllint), the sqlite history DB, lvim-keyring (secret vaulting), the
@@ -189,7 +582,7 @@ treesitter `http` grammar (add `"http"` to lvim-ts `ensure_installed` for
 highlight), and the lvim-cmp variable source.
 
 ==============================================================================
-12. HIGHLIGHTS                                         *lvim-rest-highlights*
+18. HIGHLIGHTS                                         *lvim-rest-highlights*
 
 All groups self-theme from the lvim-utils palette and rebuild on ColorScheme:
 
@@ -205,14 +598,8 @@ All groups self-theme from the lvim-utils palette and rebuild on ColorScheme:
   LvimRestEnv                                           the env chip
 
 ==============================================================================
-13. ROADMAP                                               *lvim-rest-roadmap*
+19. ROADMAP                                               *lvim-rest-roadmap*
 
-Planned and partially scaffolded (config keys reserved): the dedicated full-tab
-workbench + sqlite request library (workspaces / collections / folders /
-requests / examples / environments / runs) with a docked explorer and
-request-to-buffer binding; the collection runner with data-file iterations; Lua
-scripting with tests / assertions; OAuth2 (incl. authorization_code / PKCE);
-native gRPC (reflection, streaming) and WebSocket; and Postman v2.1 / OpenAPI /
-HAR import-export.
+Planned: HTTP/3; streaming gRPC.
 
 vim:tw=78:ts=8:ft=help:norl:

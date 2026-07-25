@@ -49,10 +49,44 @@ local function status_line(result, row)
     return line, { row = row, col_start = 0, col_end = #line, group = status_group(result.status or 0) }
 end
 
+--- WebSocket transcript: one row per frame, `HH:MM:SS <arrow>  payload`.
+---
+--- The two DIRECTIONS must be distinguishable at a glance — that is the whole information in a
+--- duplex log — so each carries its own glyph (`icons.ws_in` / `icons.ws_out`) AND its own accent
+--- (`LvimRestRecv` / `LvimRestSent`). This is also what `ws.result` builds its body text from, so
+--- the transcript has exactly one formatter.
+---@param session table  LvimRestWsSession
+---@return { lines: string[], hls: table[], filetype: string }
+function M.transcript(session)
+    local lines, hls = {}, {}
+    for _, m in ipairs(session and session.messages or {}) do
+        local inbound = m.dir == "in"
+        local prefix = ("%s %s  "):format(
+            os.date("%H:%M:%S", m.ts),
+            inbound and config.icons.ws_in or config.icons.ws_out
+        )
+        lines[#lines + 1] = prefix .. (m.data or "")
+        hls[#hls + 1] = {
+            row = #lines - 1,
+            col_start = 0,
+            col_end = #prefix,
+            group = inbound and "LvimRestRecv" or "LvimRestSent",
+        }
+    end
+    if #lines == 0 then
+        lines[1] = "No frames yet."
+    end
+    return { lines = lines, hls = hls, filetype = "text" }
+end
+
 --- Body view: the pretty-printed body, filetype from Content-Type.
 ---@param result table
 ---@return { lines: string[], hls: table[], filetype: string }
 function M.body(result)
+    -- A WebSocket result is a STREAM, not a document: it renders as its transcript.
+    if result.ws then
+        return M.transcript(result.ws)
+    end
     local ct = header_value(result.headers, "content-type")
     local text = format.pretty(result.body or "", ct)
     return {
@@ -169,32 +203,60 @@ function M.verbose(result)
     return { lines = lines, hls = hls, filetype = "text" }
 end
 
---- Script-output view (populated in the scripting phase; a placeholder until then).
+--- Script-output view: whatever the pre/post scripts wrote with `client.log`, plus any script ERROR
+--- (a script that failed to load or threw is reported here rather than only as a notification, so it
+--- is still findable after the notification is gone).
 ---@param result table
 ---@return { lines: string[], hls: table[], filetype: string }
 function M.script(result)
-    local out = result.script_output
-    if not out or out == "" then
+    local out = result.script_output or {}
+    local errs = result.script_errors or {}
+    if #out == 0 and #errs == 0 then
         return { lines = { "No script output." }, hls = {}, filetype = "text" }
     end
-    return { lines = vim.split(out, "\n", { plain = true }), hls = {}, filetype = "text" }
+    local lines, hls = {}, {}
+    for _, l in ipairs(out) do
+        lines[#lines + 1] = l
+    end
+    for _, e in ipairs(errs) do
+        lines[#lines + 1] = ("%s %s"):format(config.icons.fail, e)
+        hls[#hls + 1] = { row = #lines - 1, col_start = 0, col_end = #lines[#lines], group = "LvimRestFail" }
+    end
+    return { lines = lines, hls = hls, filetype = "text" }
 end
 
---- Assertions report view (populated in the scripting phase; a placeholder until then).
+--- Assertions report: one row per `client.test`, a failure carrying its message on the same line,
+--- and a summary row — the shape a test report is read in (scan the marks, read the failures).
 ---@param result table
 ---@return { lines: string[], hls: table[], filetype: string }
 function M.report(result)
-    local tests = result.tests
+    local tests = result.assertions
     if not tests or #tests == 0 then
         return { lines = { "No assertions." }, hls = {}, filetype = "text" }
     end
     local lines, hls = {}, {}
-    for i, t in ipairs(tests) do
-        local mark = t.passed and config.icons.ok or config.icons.fail
-        lines[i] = ("%s %s"):format(mark, t.name)
+    local passed = 0
+    for _, t in ipairs(tests) do
+        local mark = t.ok and config.icons.ok or config.icons.fail
+        local line = ("%s %s"):format(mark, t.name)
+        if not t.ok and t.message then
+            line = ("%s  %s %s"):format(line, config.icons.pointer, t.message)
+        end
+        lines[#lines + 1] = line
         hls[#hls + 1] =
-            { row = i - 1, col_start = 0, col_end = #lines[i], group = t.passed and "LvimRestPass" or "LvimRestFail" }
+            { row = #lines - 1, col_start = 0, col_end = #line, group = t.ok and "LvimRestPass" or "LvimRestFail" }
+        if t.ok then
+            passed = passed + 1
+        end
     end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = ("%d/%d passed"):format(passed, #tests)
+    hls[#hls + 1] = {
+        row = #lines - 1,
+        col_start = 0,
+        col_end = #lines[#lines],
+        group = passed == #tests and "LvimRestPass" or "LvimRestFail",
+    }
     return { lines = lines, hls = hls, filetype = "text" }
 end
 

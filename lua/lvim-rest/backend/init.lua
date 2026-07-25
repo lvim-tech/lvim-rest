@@ -19,7 +19,8 @@ local DAEMON_ONLY = { GRPC = true, WEBSOCKET = true }
 ---@type boolean one-shot guard for the "daemon not built, using curl" notice
 local warned_fallback = false
 
---- Whether the daemon RPC client is present and its binary is built.
+--- Whether the daemon RPC client is present and its binary is built. (Purely "is it there" — health
+--- reports this; whether it may be USED also depends on `daemon.autostart`.)
 ---@return boolean
 function M.daemon_available()
     local ok, rpc = pcall(require, "lvim-rest.backend.rpc")
@@ -36,8 +37,9 @@ function M.select(method)
     if config.backend == "daemon" then
         return "daemon"
     end
-    -- auto
-    if M.daemon_available() then
+    -- auto: the daemon only when it exists AND may be spawned. With `autostart = false` the user
+    -- asked for no background process, so HTTP goes to curl rather than failing.
+    if M.daemon_available() and config.daemon.autostart then
         return "daemon"
     end
     return "curl"

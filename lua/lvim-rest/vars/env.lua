@@ -72,12 +72,16 @@ local function project_root(start)
     return dir
 end
 
---- Load and merge the env files discovered upward from `path`. Returns a map profile → vars.
+--- Load and merge the env files discovered upward from `path`, RAW — nested tables intact.
+---
+--- `load` below flattens a nested value to a json string, because a `{{var}}` can only ever expand
+--- to text. Structured blocks (`Security.Auth`, see `lvim-rest.auth`) need the real table, so the
+--- undamaged form is the primitive and the flat map is derived from it.
 ---@param path string  the .http file (or its directory)
----@return table<string, table<string, string>>
-function M.load(path)
+---@return table<string, table<string, any>>
+function M.raw(path)
     local dir = vim.fn.isdirectory(path) == 1 and path or vim.fs.dirname(path)
-    ---@type table<string, table<string, string>>
+    ---@type table<string, table<string, any>>
     local profiles = {}
     for _, base in ipairs(ENV_FILES) do
         local hits = vim.fs.find(base, { path = dir, upward = true, limit = 1 })
@@ -91,12 +95,27 @@ function M.load(path)
                         if type(vars) == "table" then
                             profiles[prof] = profiles[prof] or {}
                             for k, v in pairs(vars) do
-                                profiles[prof][k] = type(v) == "table" and vim.json.encode(v) or tostring(v)
+                                profiles[prof][k] = v
                             end
                         end
                     end
                 end
             end
+        end
+    end
+    return profiles
+end
+
+--- Load and merge the env files discovered upward from `path`. Returns a map profile → vars, with
+--- every value as TEXT (a nested table becomes its json encoding — a variable expands to a string).
+---@param path string  the .http file (or its directory)
+---@return table<string, table<string, string>>
+function M.load(path)
+    local profiles = {}
+    for prof, vars in pairs(M.raw(path)) do
+        profiles[prof] = {}
+        for k, v in pairs(vars) do
+            profiles[prof][k] = type(v) == "table" and vim.json.encode(v) or tostring(v)
         end
     end
     return profiles
@@ -111,21 +130,44 @@ function M.active_vars(path)
     return (name and profiles[name]) or {}
 end
 
---- The active profile NAME for the project containing `path` (config default when unset).
+--- The ACTIVE profile's raw table (nested values intact) — what the auth layer reads.
+---@param path string
+---@return table<string, any>
+function M.active_raw(path)
+    local profiles = M.raw(path)
+    local name = M.active_name(path)
+    return (name and profiles[name]) or {}
+end
+
+--- The key the active-profile selection is remembered under, per `config.env.scope`.
+---
+--- `"project"` (the default) keys by project root, so every `.http` file in a repository shares one
+--- selection — switching to `prod` once applies to the whole API. `"buffer"` keys by the FILE, so a
+--- document can sit on a different environment than its neighbour (a staging probe next to a
+--- production runbook). Both persist; only the granularity differs.
+---@param path string
+---@return string
+local function scope_key(path)
+    if config.env.scope == "buffer" and path ~= "" and vim.fn.isdirectory(path) == 0 then
+        return path
+    end
+    return project_root(path)
+end
+
+--- The active profile NAME for `path` (config default when unset).
 ---@param path string
 ---@return string
 function M.active_name(path)
     ensure_loaded()
-    local root = project_root(path)
-    return active[root] or config.env.default
+    return active[scope_key(path)] or config.env.default
 end
 
---- Set the active profile for the project containing `path` (persisted in the plugin store).
+--- Set the active profile for `path`, in the configured scope (persisted in the plugin store).
 ---@param path string
 ---@param name string
 function M.set_active(path, name)
     ensure_loaded()
-    active[project_root(path)] = name
+    active[scope_key(path)] = name
     persist()
 end
 

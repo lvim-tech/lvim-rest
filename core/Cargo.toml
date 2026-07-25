@@ -26,11 +26,39 @@ tokio = { version = "1", features = [
     "net",
 ] }
 futures-util = "0.3"
+
+# WebSocket (rustls, no OpenSSL): a duplex connection the daemon holds open and reports frames
+# from — the one thing curl cannot do, which is why WEBSOCKET is daemon-only.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
+
+# gRPC, DYNAMICALLY: an editor cannot be rebuilt against every user's .proto, so messages are
+# described at call time — from a .proto compiled in-process by protox (no external protoc), or
+# from the server's own reflection service. prost-reflect turns either into JSON and back.
+# No `prost` feature: the codec here moves raw bytes (the message is described at run time), so
+# tonic never needs to know a message type. `channel` is what gives us Endpoint/Channel.
+tonic = { version = "0.14", default-features = false, features = [
+    "channel",
+    "codegen",
+    "transport",
+    "tls-ring",
+    "tls-webpki-roots",
+] }
+tonic-reflection = { version = "0.14", default-features = false }
+prost = "0.14"
+prost-types = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+protox = "0.9"
+bytes = "1"
+tokio-stream = "0.1"
 base64 = "0.22"
 anyhow = "1"
 
 # reqwest with rustls (no OpenSSL / native-tls): HTTP/1.1 + HTTP/2 (ALPN), streaming
-# bodies, transparent decompression, a cookie store, redirects, client-cert / proxy.
+# bodies, transparent decompression, redirects, client-cert / proxy. NO cookie feature: the Lua
+# side owns one jar for both engines, and a client-side store here would shadow it.
 # HTTP/3, gRPC (tonic) and WebSocket (tokio-tungstenite) land in phase 7 behind features.
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
@@ -38,7 +66,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "gzip",
     "brotli",
     "deflate",
-    "cookies",
     "charset",
     "http2",
     "socks",

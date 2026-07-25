@@ -15,6 +15,25 @@
 
 local M = {}
 
+-- A header line: `name: value`, where `name` is an RFC 7230 `token` — alphanumerics plus
+-- `!#$%&'*+-.^_`|~`. The obvious `[%w%-]+` is too narrow: `X_Trace_Id` and `Api.Key` headers exist
+-- in the wild, and a header the parser does not match is silently DROPPED (from the send, and from
+-- the row when a bound buffer is written back), which is the worst way to be strict.
+local HEADER_PATTERN = "^%s*([%w!#%$%%&'%*%+%-%.%^_`|~]+)%s*:%s*(.*)$"
+
+--- Read one header line. Exposed because the options FORM has to recognise the same lines this
+--- parser does (including the ones it commented out) — two definitions of "a header line" would
+--- drift the moment either is touched.
+---@param line string
+---@return string? name, string? value
+function M.match_header(line)
+    local name, value = line:match(HEADER_PATTERN)
+    if not name then
+        return nil, nil
+    end
+    return name, vim.trim(value)
+end
+
 -- Standard HTTP verbs plus the three pseudo-methods every protocol is a first-class request under.
 local METHODS = {
     GET = true,
@@ -43,6 +62,8 @@ local METHODS = {
 ---@field name          string?              `# @name` chain/replay id (also set from the `###` label)
 ---@field prompt        LvimRestPrompt[]     `# @prompt var [desc]` interactive inputs
 ---@field timeout       integer?             `# @timeout ms`
+---@field auth          LvimRestAuth?        `# @auth <scheme> [args…]`
+---@field grpc          { proto: string[], import: string[] }  `# @grpc-proto` / `# @grpc-import`
 ---@field no_log        boolean?             `# @no-log`
 ---@field no_cookie_jar boolean?             `# @no-cookie-jar`
 ---@field accept        string?              `# @accept chunked` (stream mode)
@@ -52,9 +73,23 @@ local METHODS = {
 ---@field env_stdin_cmd LvimRestStdinCmd[]   `# @env-stdin-cmd var shell…`
 ---@field extra         table<string, string> any other `# @x [value]` (preserved, not dropped)
 
+---@class LvimRestAuth
+---@field scheme string    none | basic | bearer | apikey | oauth2
+---@field args   string[]  the scheme's arguments, still holding any `{{vars}}`
+
+---@class LvimRestScript
+---@field source string   inline Lua source (empty when `file` is set)
+---@field file   string?  a path to a `.lua` script, resolved relative to the document
+---@field line   integer  1-based line the block starts on (for error messages)
+
+---@class LvimRestScripts
+---@field pre  LvimRestScript[]  run BEFORE the request is resolved (may mutate it)
+---@field post LvimRestScript[]  run AFTER the response arrives (assertions, captures)
+
 ---@class LvimRestHeader
 ---@field name  string
 ---@field value string
+---@field line  integer? 1-based line this header was read from (the options form edits that line); absent on a header synthesised at run time (the cookie jar, a script)
 
 ---@class LvimRestVar
 ---@field name  string
@@ -71,8 +106,10 @@ local METHODS = {
 ---@field body_file_var  boolean            `<@ ./file` — substitute `{{vars}}` in the included file
 ---@field save_to        string?            `>>`/`>>!` response-redirect path
 ---@field save_overwrite boolean            `>>!` overwrites without prompting
+---@field scripts        LvimRestScripts    `< {% … %}` / `> {% … %}` and `< ./x.lua` / `> ./x.lua`
 ---@field vars           LvimRestVar[]      request-local `@var = value`
 ---@field directives     LvimRestDirectives
+---@field directive_lines table<string, integer[]>  directive key → the 1-based lines it was written on
 ---@field run            string[]           `run #name` / `run ./file`
 ---@field line           integer            1-based line of the request line (inline status + jump)
 ---@field sep_line       integer            1-based line of the `###` separator (or the request line)
@@ -94,7 +131,16 @@ local function new_request()
         body_file_var = false,
         save_overwrite = false,
         vars = {},
-        directives = { prompt = {}, curl = {}, stdin_cmd = {}, env_stdin_cmd = {}, extra = {} },
+        scripts = { pre = {}, post = {} },
+        directives = {
+            prompt = {},
+            curl = {},
+            stdin_cmd = {},
+            env_stdin_cmd = {},
+            grpc = { proto = {}, import = {} },
+            extra = {},
+        },
+        directive_lines = {},
         run = {},
         line = 0,
         sep_line = 0,
@@ -132,9 +178,15 @@ local function match_request_line(line)
 end
 
 --- Parse one `# @directive` payload (the text after the `#`/`//` and the `@`).
+---
+--- `lnum` is recorded per key in `req.directive_lines` — the options form edits a directive by
+--- replacing / deleting THAT line, and only the parser knows which lines it read a directive from
+--- (`#` or `//`, any spacing). A key can legitimately repeat (`@prompt`, `@curl-*`), so the record
+--- is a LIST in document order.
 ---@param req LvimRestRequest
 ---@param payload string  e.g. "name login" or "timeout 5000" or "curl-insecure"
-local function apply_directive(req, payload)
+---@param lnum integer    the 1-based line the directive was written on
+local function apply_directive(req, payload, lnum)
     local d = req.directives
     local key, rest = payload:match("^([%w_%-%.]+)%s*(.*)$")
     if not key then
@@ -142,6 +194,9 @@ local function apply_directive(req, payload)
     end
     rest = vim.trim(rest or "")
     local lkey = key:lower()
+    local lines = req.directive_lines[lkey] or {}
+    lines[#lines + 1] = lnum
+    req.directive_lines[lkey] = lines
     if lkey == "name" then
         req.name = rest ~= "" and rest or req.name
         d.name = req.name
@@ -152,6 +207,23 @@ local function apply_directive(req, payload)
         end
     elseif lkey == "timeout" then
         d.timeout = tonumber(rest)
+    elseif lkey == "auth" then
+        -- The arguments keep their `{{vars}}` — they are resolved with the rest of the request, so
+        -- `# @auth bearer {{token}}` reads the same variables everything else does.
+        local words = vim.split(rest, "%s+")
+        local scheme = table.remove(words, 1)
+        if scheme and scheme ~= "" then
+            d.auth = { scheme = scheme:lower(), args = words }
+        end
+    elseif lkey == "grpc-proto" then
+        -- Naming a `.proto` makes the call independent of whether the server exposes reflection.
+        if rest ~= "" then
+            d.grpc.proto[#d.grpc.proto + 1] = rest
+        end
+    elseif lkey == "grpc-import" then
+        if rest ~= "" then
+            d.grpc.import[#d.grpc.import + 1] = rest
+        end
     elseif lkey == "no-log" then
         d.no_log = true
     elseif lkey == "no-cookie-jar" then
@@ -171,14 +243,13 @@ local function apply_directive(req, payload)
             d.env_stdin_cmd[#d.env_stdin_cmd + 1] = { var = var, cmd = cmd }
         end
     elseif lkey:match("^curl%-") then
-        -- `@curl-<flag>[=value]` — the escape hatch for raw curl flags.
+        -- `@curl-<flag>[=value]` — the escape hatch for raw curl flags. BOTH separators mean the same
+        -- thing, and the `=` form arrives split: the key pattern stops at the `=`, so the value shows
+        -- up at the head of `rest` (`@curl-max-redirs=5` → key "curl-max-redirs", rest "=5"). Without
+        -- this the argv became `--max-redirs =5`, which curl rejects.
         local flag = lkey:sub(6)
-        local fname, fval = flag:match("^([^=]+)=(.*)$")
-        if fname then
-            d.curl[fname] = fval
-        else
-            d.curl[flag] = rest ~= "" and rest or true
-        end
+        local value = rest:match("^=%s*(.*)$") or rest
+        d.curl[flag] = value ~= "" and value or true
     else
         -- Unknown directive (e.g. @grpc-*, @postman-test): preserve, never drop.
         d.extra[lkey] = rest
@@ -200,6 +271,11 @@ function M.parse(text)
     local seen_method = false
     local doc_scope = true -- @var lines before the first request line are document-scoped
 
+    -- An open `{% … %}` script block: everything up to `%}` is captured verbatim, whatever phase we
+    -- are in — a script may contain `###`, `>` or a blank line and none of them may be reinterpreted.
+    ---@type { kind: "pre"|"post", line: integer, lines: string[] }?
+    local script_block
+
     --- Push the current request (if it has a method) and reset for the next block.
     ---@param end_line integer
     local function flush(end_line)
@@ -219,11 +295,54 @@ function M.parse(text)
         phase = "pre"
     end
 
+    --- Start an inline script block, or record a script FILE, from a `<`/`>` marker line.
+    --- Returns true when the line was a script marker (so the caller stops interpreting it).
+    ---@param kind "pre"|"post"
+    ---@param rest string   whatever followed the marker on the same line
+    ---@param lnum integer
+    ---@return boolean handled
+    local function script_marker(kind, rest, lnum)
+        local open = rest:match("^{%%(.*)$")
+        if open then
+            script_block = { kind = kind, line = lnum, lines = {} }
+            -- `< {% code %}` on one line closes immediately.
+            local body, closed = open:match("^(.-)%%}"), open:find("%%}")
+            if closed then
+                script_block.lines[1] = body or ""
+                cur.scripts[kind][#cur.scripts[kind] + 1] = { source = vim.trim(body or ""), line = lnum }
+                script_block = nil
+            elseif vim.trim(open) ~= "" then
+                script_block.lines[1] = open
+            end
+            return true
+        end
+        -- A `.lua` FILE. `< ./body.json` in the body is the body-include and never reaches here:
+        -- position disambiguates the two uses of `<`, exactly as the format intends.
+        local path = vim.trim(rest)
+        if path ~= "" and path:lower():match("%.lua$") then
+            cur.scripts[kind][#cur.scripts[kind] + 1] = { source = "", file = path, line = lnum }
+            return true
+        end
+        return false
+    end
+
     for i, raw in ipairs(lines) do
         local line = raw
         local trimmed = vim.trim(line)
 
-        if trimmed:match("^###") then
+        if script_block then
+            -- Inside `{% … %}`: capture verbatim until the closing marker.
+            local before = line:match("^(.-)%%}")
+            if before then
+                script_block.lines[#script_block.lines + 1] = before
+                local src = vim.trim(table.concat(script_block.lines, "\n"))
+                local list = cur.scripts[script_block.kind]
+                list[#list + 1] = { source = src, line = script_block.line }
+                script_block = nil
+            else
+                script_block.lines[#script_block.lines + 1] = line
+            end
+        elseif trimmed:match("^###") then
             -- Separator: flush the previous request, start a new block whose label is the trailing text.
             flush(i - 1)
             local label = vim.trim(trimmed:gsub("^#+%s*", ""))
@@ -235,9 +354,12 @@ function M.parse(text)
         elseif phase == "body" then
             -- In the body, lines are literal — except the response-redirect and file-include markers.
             local rd, path = trimmed:match("^(>>!?)%s+(.+)$")
+            local post_marker = (not rd) and trimmed:match("^>%s*(.*)$") or nil
             if rd then
                 cur.save_to = path
                 cur.save_overwrite = rd == ">>!"
+            elseif post_marker and script_marker("post", post_marker, i) then
+                -- a `> {% … %}` block or a `> ./x.lua` post-response script
             elseif #body_lines == 0 and trimmed:match("^<@?%s") then
                 local var, fpath = trimmed:match("^(<@?)%s+(.+)$")
                 cur.body_file = fpath
@@ -252,7 +374,14 @@ function M.parse(text)
             local run_dir = trimmed:match("^run%s+(.+)$")
             local import_dir = trimmed:match("^import%s+(.+)$")
 
-            if var_name then
+            local pre_marker = trimmed:match("^<%s*(.*)$")
+            local post_marker = trimmed:match("^>%s*(.*)$")
+
+            if pre_marker and script_marker("pre", pre_marker, i) then
+                -- a `< {% … %}` block or a `< ./x.lua` pre-request script
+            elseif post_marker and script_marker("post", post_marker, i) then
+                -- a post-response script written before the request line (accepted, not required)
+            elseif var_name then
                 local entry = { name = var_name, value = var_val }
                 if doc_scope then
                     doc.vars[#doc.vars + 1] = entry
@@ -260,7 +389,7 @@ function M.parse(text)
                     cur.vars[#cur.vars + 1] = entry
                 end
             elseif directive then
-                apply_directive(cur, directive)
+                apply_directive(cur, directive, i)
             elseif run_dir then
                 cur.run[#cur.run + 1] = run_dir
             elseif import_dir then
@@ -283,9 +412,9 @@ function M.parse(text)
                 if trimmed == "" then
                     phase = "body"
                 else
-                    local hname, hval = line:match("^%s*([%w%-]+)%s*:%s*(.*)$")
+                    local hname, hval = M.match_header(line)
                     if hname then
-                        cur.headers[#cur.headers + 1] = { name = hname, value = vim.trim(hval) }
+                        cur.headers[#cur.headers + 1] = { name = hname, value = hval or "", line = i }
                     end
                     -- Non-matching lines in the header block are ignored (tolerant).
                 end

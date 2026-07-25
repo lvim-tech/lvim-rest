@@ -12,8 +12,8 @@
 
 ---@class LvimRestDaemonConfig
 ---@field bin           string?   Explicit daemon binary path (nil = installer/repo-managed path)
----@field autostart     boolean   Spawn the daemon lazily on the first daemon-backed request
----@field idle_timeout  integer   Milliseconds of inactivity before the idle daemon is stopped
+---@field autostart     boolean   Spawn the daemon lazily on the first daemon-backed request; `false` keeps the editor process-free (HTTP/GraphQL run on curl, the daemon-only protocols report it is off)
+---@field idle_timeout  integer   Milliseconds of inactivity before the idle daemon is stopped (0 = keep it running); a live WebSocket session holds it open
 
 ---@class LvimRestWorkbenchDock
 ---@field position "right"|"bottom"  The response dock side inside the workbench tab
@@ -32,7 +32,7 @@
 ---@field size   LvimRestDockSize          Dock geometry per layout
 
 ---@class LvimRestEnvConfig
----@field scope    "project"|"buffer"  Active-env scope: sticky per project, or per file
+---@field scope    "project"|"buffer"  Active-env scope: sticky per project root, or per file
 ---@field default  string              Default env profile name
 ---@field hud_chip boolean             Show the lvim-hud env chip while a non-default env is active
 
@@ -44,6 +44,7 @@
 ---@field follow_redirects boolean               Follow 3xx redirects
 ---@field insecure         boolean               Skip TLS verification (per-request `@curl-insecure` overrides)
 ---@field http_version     "auto"|"1.1"|"2"|"3"  Preferred HTTP version
+---@field send_all_delay   integer               Pause between requests in a buffer-wide send-all (ms)
 ---@field chain            LvimRestChainConfig    Request-chaining behaviour
 
 ---@class LvimRestFormatConfig
@@ -56,7 +57,6 @@
 ---@class LvimRestRunnerConfig
 ---@field delay           integer  Delay between requests in a collection run (ms)
 ---@field stop_on_failure boolean  Stop the run on the first failed request
----@field parallel        integer  Max requests in flight during a run (1 = serial)
 
 ---@class LvimRestLibraryConfig
 ---@field confirm_delete boolean               Confirm before deleting a library item
@@ -71,6 +71,26 @@
 ---@field bodies      boolean  Store response bodies/headers (off by default — size + secrets)
 ---@field max_entries integer  Retention cap (older rows pruned)
 
+---@class LvimRestOptionsKeys
+---@field add    string  add a row (a query param / a header / a directive entry)
+---@field delete string  delete the row under the cursor
+---@field toggle string  comment a header line out / back in
+---@field rename string  edit the row's NAME (a param name, a header name)
+---@field send   string  send the request and close the panel
+---@field help   string  the panel's key help
+
+---@class LvimRestOptionsTab
+---@field label string
+---@field icon  string
+
+---@class LvimRestOptionsConfig
+---@field layout "float"|"area"|"bottom"  Panel layout (a per-command token overrides it)
+---@field keys   LvimRestOptionsKeys
+---@field tabs   { params: LvimRestOptionsTab, headers: LvimRestOptionsTab, settings: LvimRestOptionsTab }
+
+---@class LvimRestUiConfig
+---@field options LvimRestOptionsConfig  The request-options form (`:LvimRest options`)
+
 ---@class LvimRestKeys
 ---@field send           string  Send the request under the cursor
 ---@field send_all       string  Send every request in the buffer
@@ -80,6 +100,7 @@
 ---@field jump_next      string  Jump to the next request
 ---@field jump_prev      string  Jump to the previous request
 ---@field explorer       string  Focus/open the collection explorer
+---@field options        string  Open the request options form
 ---@field run_collection string  Run the current collection/folder
 ---@field save_into      string  Save the request into a collection
 
@@ -92,19 +113,17 @@
 ---@field graphql    string
 ---@field grpc       string
 ---@field ws         string
----@field running    string
 ---@field ok         string
 ---@field fail       string
 ---@field env        string
----@field sent       string
----@field recv       string
 ---@field workspace  string
 ---@field collection string
 ---@field folder     string
 ---@field request    string
----@field jq         string
----@field history    string
----@field stats      string
+---@field expand_open   string  Caret of an OPEN fold header (the options form's sections)
+---@field expand_closed string  Caret of a CLOSED fold header
+---@field ws_in      string  Inbound websocket frame marker
+---@field ws_out     string  Outbound websocket frame marker
 ---@field pointer    string  Active/selected marker + sequence separator (canon `➤`)
 ---@field spinner    string[] Braille spinner frames for the inline running lane
 
@@ -120,11 +139,14 @@
 ---@field library       LvimRestLibraryConfig
 ---@field vault         LvimRestVaultConfig
 ---@field cookies       { enabled: boolean }
----@field scripts       { enabled: boolean }
+---@field auth          { enabled: boolean, oauth2: { redirect_port: integer, timeout: integer, leeway: integer, browser_cmd: string? } }
+---@field ws            { max_messages: integer }
+---@field scripts       { enabled: boolean, show_report: string }  show_report: always|on_failure|never
 ---@field history       LvimRestHistoryConfig
 ---@field scrub_secrets boolean                 Mask Authorization/Cookie/vault values everywhere they surface
 ---@field prompt        { cache: boolean }       Cache prompt-var values for the session (never persisted)
 ---@field inline_status boolean                 Show the per-request extmark status lane
+---@field ui            LvimRestUiConfig         The interactive panels
 ---@field keys          LvimRestKeys             Buffer-local maps for http/rest filetypes (all configurable)
 ---@field icons         LvimRestIcons
 
@@ -158,6 +180,7 @@ return {
         follow_redirects = true,
         insecure = false,
         http_version = "auto",
+        send_all_delay = 0, -- `:LvimRest all` is a sweep of one buffer, not a throttled run
         chain = { auto_run = true },
     },
     format = {
@@ -169,11 +192,35 @@ return {
     },
     library = {
         confirm_delete = true,
-        runner = { delay = 0, stop_on_failure = false, parallel = 1 },
+        runner = { delay = 0, stop_on_failure = false },
     },
     vault = { enabled = true, auto = false },
     cookies = { enabled = true },
-    scripts = { enabled = true },
+    auth = {
+        enabled = true,
+        oauth2 = {
+            redirect_port = 8765, -- the loopback port the authorization_code redirect comes back to
+            timeout = 180000, -- how long to wait for that redirect
+            leeway = 60, -- refresh this many seconds before a token actually expires
+            browser_cmd = nil, -- nil = vim.ui.open (the desktop's own handler)
+        },
+    },
+    ws = {
+        max_messages = 500, -- per session; a stream must not become the only thing in memory
+    },
+    -- The interactive panels (every label, icon, key and layout an option).
+    ui = {
+        options = {
+            layout = "float", -- "float" | "area" | "bottom"
+            keys = { add = "a", delete = "d", toggle = "t", rename = "r", send = "s", help = "?" },
+            tabs = {
+                params = { label = "Params", icon = "󰘲" },
+                headers = { label = "Headers", icon = "󰈻" },
+                settings = { label = "Settings", icon = "󰒓" },
+            },
+        },
+    },
+    scripts = { enabled = true, show_report = "on_failure" }, -- always | on_failure | never
     history = { enabled = true, bodies = false, max_entries = 500 },
     scrub_secrets = true,
     prompt = { cache = true },
@@ -189,6 +236,7 @@ return {
         explorer = "<leader>rc",
         run_collection = "<leader>rR",
         save_into = "<leader>rs",
+        options = "<leader>ro",
     },
     -- Real Nerd Font single-width glyphs (verified via strdisplaywidth); `➤` for pointers/separators.
     icons = {
@@ -200,19 +248,17 @@ return {
         graphql = "󰡷",
         grpc = "󰢹",
         ws = "󰖟",
-        running = "󰦖",
+        expand_open = "",
+        expand_closed = "",
+        ws_in = "󰁅", -- a frame the server sent — the two directions must not look the same
+        ws_out = "󰁝", -- a frame this editor sent
         ok = "󰄬",
         fail = "󰅚",
         env = "󰙅",
-        sent = "󰁝",
-        recv = "󰁅",
         workspace = "󰆧",
         collection = "󰉓",
         folder = "󰉋",
         request = "󰋼",
-        jq = "󰈲",
-        history = "󰋚",
-        stats = "󰓅",
         pointer = "➤",
         spinner = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
     },

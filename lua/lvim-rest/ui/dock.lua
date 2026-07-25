@@ -14,6 +14,7 @@ local surface = require("lvim-ui.surface")
 local config = require("lvim-rest.config")
 local views = require("lvim-rest.ui.views")
 local format = require("lvim-rest.format")
+local fs = require("lvim-rest.fs")
 
 local M = {}
 
@@ -205,8 +206,12 @@ local function save_body()
             if not ok or not path or path == "" then
                 return
             end
-            pcall(vim.fn.writefile, vim.split(state.result.body or "", "\n", { plain = true }), vim.fn.expand(path))
-            vim.notify("lvim-rest: saved " .. path, vim.log.levels.INFO)
+            -- Verbatim bytes (see `lvim-rest.fs`): saving a response must reproduce it exactly.
+            local ok_write, err = fs.write(vim.fn.expand(path), state.result.body or "")
+            vim.notify(
+                ok_write and ("lvim-rest: saved " .. path) or ("lvim-rest: could not save " .. tostring(err)),
+                ok_write and vim.log.levels.INFO or vim.log.levels.ERROR
+            )
         end,
     })
 end
@@ -332,7 +337,7 @@ function M.show(result, meta)
         end
         local ext = format.content_filetype(ct)
         local path = ("%s/response-%d.%s"):format(dir, os.time(), ext == "text" and "txt" or ext)
-        pcall(vim.fn.writefile, vim.split(result.body, "\n", { plain = true }), path)
+        fs.write(path, result.body)
         state.oversized = path
     end
     -- Pre-seed the jq filter from a `# @jq` directive.
@@ -340,6 +345,15 @@ function M.show(result, meta)
         state.jq = result.request.directives.jq
     end
     state.view = config.default_view
+    -- A failed assertion the user never sees is a test that did not run. `scripts.show_report`
+    -- decides how insistent that is: "on_failure" (default) opens the report only when something
+    -- failed, "always" whenever a request had tests at all, "never" leaves `default_view` alone.
+    local mode = config.scripts.show_report
+    if result.assertions and #result.assertions > 0 and mode ~= "never" then
+        if mode == "always" or (result.tests_failed or 0) > 0 then
+            state.view = "report"
+        end
+    end
     if is_open() then
         render()
         if state.surface then

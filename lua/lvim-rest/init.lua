@@ -88,13 +88,184 @@ local function attach_buffer(bufnr)
     map(k.jump_prev, function()
         jump_request(-1)
     end, "prev request")
+    map(k.save_into, function()
+        require("lvim-rest.convert").save_into_collection(bufnr, vim.api.nvim_win_get_cursor(0)[1])
+    end, "save into a collection")
+    map(k.options, function()
+        require("lvim-rest.ui.options").open(bufnr, vim.api.nvim_win_get_cursor(0)[1])
+    end, "request options form")
+    map(k.explorer, function()
+        require("lvim-rest.ui.explorer").open({ enter = true })
+    end, "the library tree")
+    map(k.run_collection, function()
+        require("lvim-rest.convert").pick_collection("Run which collection?", function(cid)
+            require("lvim-rest.runner.iterate").run({ collection_id = cid })
+        end)
+    end, "run a collection")
 end
 
 -- ── :LvimRest command ───────────────────────────────────────────────────────
 
 --- The subcommand table: name → handler(arg).
----@type table<string, fun(arg: string?)>
+---@type table<string, fun(arg: string?, rest: string?)>
 local subcommands = {
+    -- The WORKBENCH: a tab of its own with the library tree beside the request editor. `workbench`
+    -- toggles it; `library` docks just the tree as a sidebar next to whatever you are already doing.
+    workbench = function()
+        require("lvim-rest.ui.workbench").toggle()
+    end,
+    library = function()
+        require("lvim-rest.ui.explorer").open({ enter = true })
+    end,
+    -- Run a whole collection. `arg` is an optional data file (json array / csv with a header) —
+    -- one pass per row, its values entering the top-priority `data` variable scope.
+    run = function(arg)
+        local lib = require("lvim-rest.store.library")
+        local ws = lib.active_workspace()
+        local first = ws and lib.collections(ws.id)[1]
+        if not first then
+            return vim.notify("lvim-rest: no collection to run", vim.log.levels.WARN)
+        end
+        require("lvim-rest.runner.iterate").run({ collection_id = first.id, data_file = arg })
+    end,
+    -- `cookies` lists the jar; `cookies clear [text]` drops all of them, or those whose domain
+    -- contains `text`.
+    cookies = function(arg)
+        local jar = require("lvim-rest.cookies")
+        if arg == "clear" then
+            return vim.notify(("lvim-rest: dropped %d cookie(s)"):format(jar.clear()), vim.log.levels.INFO)
+        end
+        local rows = jar.list()
+        if #rows == 0 then
+            return vim.notify("lvim-rest: the cookie jar is empty", vim.log.levels.INFO)
+        end
+        local items = {}
+        for _, c in ipairs(rows) do
+            items[#items + 1] = {
+                label = ("%s%s  %s"):format(c.domain, c.path ~= "/" and c.path or "", c.name),
+                icon = config.icons.env,
+                _c = c,
+            }
+        end
+        require("lvim-ui").select({
+            title = "Cookies",
+            items = items,
+            callback = function(confirmed, index)
+                if not confirmed or not index then
+                    return
+                end
+                local c = items[index]._c
+                jar.clear(c.domain)
+                vim.notify(("lvim-rest: dropped the cookies for %s"):format(c.domain), vim.log.levels.INFO)
+            end,
+        })
+    end,
+    -- `grpc <endpoint>` lists a server's services and methods (through its reflection service, or
+    -- through a `# @grpc-proto` in the current buffer's request when it names one).
+    grpc = function(_, rest)
+        local url = rest
+        if not url or url == "" then
+            -- Default to the endpoint of the request under the cursor: listing a server you are
+            -- already writing against should not need it typed again.
+            local buf = vim.api.nvim_get_current_buf()
+            local doc = require("lvim-rest.parser").parse(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+            local req = require("lvim-rest.parser").request_at(doc, vim.api.nvim_win_get_cursor(0)[1])
+            url = req and req.url or ""
+        end
+        if url == "" then
+            return vim.notify("lvim-rest: :LvimRest grpc <host:port>", vim.log.levels.WARN)
+        end
+        local endpoint = url:gsub("^%a[%w+.-]*://", ""):match("^([^/]+)") or url
+        require("lvim-rest.backend.rpc").request("grpc.list", { url = endpoint, methods = true }, function(res, err)
+            if err then
+                return vim.notify("lvim-rest: " .. err, vim.log.levels.ERROR)
+            end
+            local items = {}
+            for _, svc in ipairs(res.services or {}) do
+                for _, m in ipairs((res.methods or {})[svc] or {}) do
+                    items[#items + 1] = { label = ("%s/%s"):format(svc, m), icon = config.icons.grpc }
+                end
+            end
+            if #items == 0 then
+                return vim.notify("lvim-rest: the server advertises no methods", vim.log.levels.INFO)
+            end
+            require("lvim-ui").select({
+                title = "gRPC — " .. endpoint,
+                items = items,
+                -- Choosing one writes the request skeleton at the cursor: the point of listing
+                -- is to then call it, and retyping a fully-qualified method is where typos live.
+                callback = function(confirmed, index)
+                    if not confirmed or not index then
+                        return
+                    end
+                    local lines = {
+                        "### " .. items[index].label,
+                        ("GRPC %s/%s"):format(endpoint, items[index].label),
+                        "",
+                        "{}",
+                    }
+                    vim.api.nvim_put(lines, "l", true, true)
+                end,
+            })
+        end)
+    end,
+    -- `ws <text>` sends a frame on the current session; `ws close` closes it; bare `ws` lists them.
+    ws = function(arg, rest)
+        local sock = require("lvim-rest.ws")
+        if arg == "close" then
+            return sock.close()
+        end
+        if rest and rest ~= "" then
+            sock.send(rest)
+            return
+        end
+        local rows = sock.list()
+        if #rows == 0 then
+            return vim.notify("lvim-rest: no websocket sessions", vim.log.levels.INFO)
+        end
+        local items = {}
+        for _, s in ipairs(rows) do
+            items[#items + 1] = {
+                label = ("%s  %s  (%d msg)"):format(s.open and "open" or "closed", s.url, #s.messages),
+                icon = config.icons.ws,
+                _id = s.id,
+            }
+        end
+        require("lvim-ui").select({
+            title = "WebSocket sessions",
+            items = items,
+            callback = function(confirmed, index)
+                if confirmed and index then
+                    sock.focus(items[index]._id)
+                    require("lvim-rest.ui.dock").show(sock.result(), { title = items[index].label })
+                end
+            end,
+        })
+    end,
+    -- OAuth2 tokens: `auth` shows what is cached, `auth clear` forgets it.
+    auth = function(arg)
+        local a = require("lvim-rest.auth")
+        if arg == "clear" then
+            return vim.notify(("lvim-rest: forgot %d cached token(s)"):format(a.forget()), vim.log.levels.INFO)
+        end
+        local path = vim.api.nvim_buf_get_name(0)
+        local profiles = a.profiles(path)
+        local o2 = require("lvim-rest.auth.oauth2")
+        local lines = {}
+        for id, p in pairs(profiles) do
+            local t = o2.cached(id)
+            lines[#lines + 1] = ("%s (%s): %s"):format(
+                id,
+                o2.grant_of(p),
+                t and (o2.fresh(t) and "token cached" or "token expired") or "no token"
+            )
+        end
+        vim.notify(
+            #lines > 0 and ("lvim-rest auth:\n" .. table.concat(lines, "\n"))
+                or "lvim-rest: no Security.Auth profiles in the active environment",
+            vim.log.levels.INFO
+        )
+    end,
     send = function()
         require("lvim-rest.runner").send(vim.api.nvim_get_current_buf(), vim.api.nvim_win_get_cursor(0)[1])
     end,
@@ -109,6 +280,12 @@ local subcommands = {
     end,
     inspect = function()
         require("lvim-rest.ui.inspect").show(vim.api.nvim_get_current_buf(), vim.api.nvim_win_get_cursor(0)[1])
+    end,
+    -- The request OPTIONS form (params / headers / directives) over the request under the cursor.
+    -- `arg` is an optional layout token, per the panel canon.
+    options = function(arg)
+        local layout = (arg == "float" or arg == "area" or arg == "bottom") and arg or nil
+        require("lvim-rest.ui.options").open(vim.api.nvim_get_current_buf(), vim.api.nvim_win_get_cursor(0)[1], layout)
     end,
     history = function()
         require("lvim-rest.history").pick()
@@ -158,6 +335,9 @@ local subcommands = {
     export = function()
         require("lvim-rest.convert").export()
     end,
+    save = function()
+        require("lvim-rest.convert").save_into_collection()
+    end,
     scratch = function()
         local path = vim.fn.stdpath("state") .. "/lvim-rest"
         vim.fn.mkdir(path, "p")
@@ -176,6 +356,9 @@ local function register_command()
     vim.api.nvim_create_user_command("LvimRest", function(cmd)
         local sub = cmd.fargs[1]
         local arg = cmd.fargs[2]
+        -- Everything after the subcommand, verbatim: a websocket frame or a jq filter is text with
+        -- spaces in it, and `fargs[2]` would silently keep only the first word.
+        local rest = sub and vim.trim((cmd.args or ""):sub(#sub + 1)) or ""
         if not sub then
             vim.notify(
                 ("lvim-rest: engine=%s  in-flight=%d  (subcommands: %s)"):format(
@@ -189,7 +372,7 @@ local function register_command()
         end
         local handler = subcommands[sub]
         if handler then
-            handler(arg)
+            handler(arg, rest)
         else
             vim.notify("lvim-rest: unknown subcommand '" .. sub .. "'", vim.log.levels.WARN)
         end
@@ -216,6 +399,18 @@ function M.setup(opts)
     registered = true
 
     register_command()
+
+    -- The library panel is a PERSISTENT side panel, so its filetype goes in `panel_ft`: the cursor is
+    -- hidden only while the panel is the CURRENT window, never globally — the code beside it keeps
+    -- its cursor. Self-registration, so installing the plugin needs no edit to any central config.
+    pcall(function()
+        require("lvim-utils.cursor").register({ panel_ft = { "LvimRestLibrary" } })
+    end)
+
+    -- A `Set-Cookie` with no expiry asked to live for the session; an editor session is that session.
+    if config.cookies.enabled then
+        require("lvim-rest.cookies").drop_session_cookies()
+    end
 
     local grp = vim.api.nvim_create_augroup("lvim_rest", { clear = true })
     -- Attach the buffer-local maps whenever an http/rest buffer gets its filetype.

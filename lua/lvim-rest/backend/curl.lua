@@ -10,6 +10,7 @@
 ---@module "lvim-rest.backend.curl"
 
 local config = require("lvim-rest.config")
+local fs = require("lvim-rest.fs")
 
 local M = {}
 
@@ -184,7 +185,7 @@ function M.build_argv(resolved, files)
     end
     if body and body ~= "" then
         files.body = tmpfile("body")
-        vim.fn.writefile(vim.split(body, "\n", { plain = true }), files.body, "b")
+        fs.write(files.body, body) -- verbatim: `--data-binary @file` sends exactly these bytes
         argv[#argv + 1] = "--data-binary"
         argv[#argv + 1] = "@" .. files.body
     end
@@ -232,8 +233,8 @@ function M.run(resolved, cb)
                 return
             end
             local hdr = parse_headers(files.header)
-            local body_ok, body_lines = pcall(vim.fn.readfile, files.out)
-            local body = body_ok and table.concat(body_lines, "\n") or ""
+            -- The body is BYTES: see `lvim-rest.fs` for why readfile cannot be used here.
+            local body = fs.read(files.out)
             local jok, decoded = pcall(vim.json.decode, vim.trim(obj.stdout or ""))
             ---@type table<string, any>
             local info = (jok and type(decoded) == "table") and decoded or {}

@@ -32,7 +32,9 @@ impl Writer {
 
     /// Emit a successful response for `id`.
     pub fn ok(&self, id: i64, result: Value) {
-        let _ = self.tx.send(json!({ "id": id, "ok": true, "result": result }).to_string());
+        let _ = self
+            .tx
+            .send(json!({ "id": id, "ok": true, "result": result }).to_string());
     }
 
     /// Emit an error response for `id`.
@@ -46,6 +48,8 @@ impl Writer {
     /// Used by the incremental-streaming path added in a later phase.
     #[allow(dead_code)]
     pub fn notify(&self, method: &str, params: Value) {
-        let _ = self.tx.send(json!({ "method": method, "params": params }).to_string());
+        let _ = self
+            .tx
+            .send(json!({ "method": method, "params": params }).to_string());
     }
 }

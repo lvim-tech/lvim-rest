@@ -41,6 +41,23 @@ function M.check()
     else
         h.info("lvim-rest-core daemon: not built (build via lvim-installer for gRPC/WebSocket/HTTP-3)")
     end
+    -- `autostart = false` is the reason a BUILT daemon still never runs; without this line that
+    -- looks like the daemon is broken.
+    if not config.daemon.autostart then
+        h.warn(
+            "daemon.autostart = false — the daemon is never spawned (HTTP/GraphQL use curl; gRPC/WebSocket cannot run)"
+        )
+    elseif daemon_available then
+        local rpc = require("lvim-rest.backend.rpc")
+        h.info(
+            ("daemon: %s%s"):format(
+                rpc.is_running() and "running" or "not started yet (spawned on first use)",
+                (config.daemon.idle_timeout or 0) > 0
+                        and (", idle-stopped after %ds"):format(math.floor(config.daemon.idle_timeout / 1000))
+                    or ", never idle-stopped"
+            )
+        )
+    end
 
     -- curl fallback.
     local curl_ok = vim.fn.executable("curl") == 1
@@ -68,8 +85,63 @@ function M.check()
     -- The request library DB.
     if require("lvim-rest.store").available() then
         h.ok(("sqlite.lua: found (request library + history, schema v%d)"):format(require("lvim-rest.store").version()))
+        -- What is actually IN the library — an empty one is the usual reason `:LvimRest run` says
+        -- there is nothing to run.
+        local ok_lib, lib = pcall(require, "lvim-rest.store.library")
+        if ok_lib then
+            local ws = lib.active_workspace()
+            if ws then
+                local cols = lib.collections(ws.id)
+                local n = 0
+                for _, c in ipairs(cols) do
+                    n = n + #require("lvim-rest.runner.iterate").plan(c.id)
+                end
+                h.info(("library: workspace %q, %d collection(s), %d request(s)"):format(ws.name, #cols, n))
+            else
+                h.info("library: empty (a workspace is created on first use)")
+            end
+        end
     else
         h.warn("sqlite.lua not found — history + the request library are disabled (install kkharji/sqlite.lua)")
+    end
+
+    -- Daemon-only protocols: saying "gRPC needs the daemon" HERE is cheaper than finding out at
+    -- send time, since a curl-only install can still do everything else.
+    if not daemon_available then
+        h.info("gRPC + WebSocket: unavailable (they need the daemon — curl can do neither)")
+    else
+        h.ok("gRPC + WebSocket: available (dynamic protobuf via reflection or a .proto)")
+    end
+
+    -- OAuth2 profiles of the ACTIVE environment, and whether a token is held.
+    if config.auth.enabled then
+        local ok_auth, auth = pcall(require, "lvim-rest.auth")
+        -- The CWD, not the current buffer: `:checkhealth` runs in its own buffer, so asking about
+        -- "this file" would always look next to the health window instead of next to the project.
+        local profiles = ok_auth and auth.profiles(vim.fn.getcwd()) or {}
+        local n = vim.tbl_count(profiles)
+        if n > 0 then
+            local o2 = require("lvim-rest.auth.oauth2")
+            local held = 0
+            for id in pairs(profiles) do
+                if o2.fresh(o2.cached(id)) then
+                    held = held + 1
+                end
+            end
+            h.info(("auth: %d OAuth2 profile(s) in the active environment, %d with a live token"):format(n, held))
+        else
+            h.info("auth: no Security.Auth profiles in the active environment (the other schemes need none)")
+        end
+    else
+        h.info("auth: disabled (auth.enabled = false)")
+    end
+
+    -- The cookie jar (a stale jar is a common reason a request is unexpectedly authenticated).
+    if config.cookies.enabled then
+        local ok_ck, jar = pcall(require, "lvim-rest.cookies")
+        h.info(("cookie jar: enabled, %d cookie(s)"):format(ok_ck and #jar.list() or 0))
+    else
+        h.info("cookie jar: disabled (cookies.enabled = false)")
     end
 
     -- lvim-keyring (secret vaulting).
