@@ -67,6 +67,11 @@ function M.open()
         id = ID,
         layout = ((config.workbench or {}).dock or {}).span == "full" and "full" or "stacked",
         editor = { placeholder = placeholder(), filetype = "http", name = "lvim-rest" },
+        -- Appear in the shared <Leader>m dock menu; restorable (reopen) even after it was closed.
+        menu = { name = "REST workbench", icon = (config.icons or {}).request },
+        restore = function()
+            M.open()
+        end,
         -- LEFT: the library tree, through the shared explorer provider + the surface chassis.
         sidebar = function()
             local ok, surf = pcall(explorer.open, {
