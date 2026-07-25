@@ -2,58 +2,42 @@
 --
 --   ┌───────────────┬──────────────────────────────────────────┐
 --   │  explorer     │  request editor (the bound `.http` buf)  │
---   │  (library     │                                          │
---   │   tree)       │  …the response dock opens per its own    │
---   │               │   configured layout over/under this      │
+--   │  (library     ├──────────────────────────────────────────┤
+--   │   tree,       │  response dock — PERSISTENT, stacked in   │
+--   │   full        │  the right column below the editor        │
+--   │   height)     │  (editor 1/3 · response 2/3 by default)   │
 --   └───────────────┴──────────────────────────────────────────┘
 --
--- It OWNS A TABPAGE, never the user's layout: `open()` creates one and `close()` drops it, putting
--- the previous tab back. That is the whole reason a workbench exists — a library browser plus an
--- editor plus a response pane cannot share a window with the code you were reading.
---
--- The left pane hosts the SAME `ui.explorer` provider the standalone sidebar uses (one tree, two
--- hosts): the surface chassis owns the window, the fold state lives in the tree handle, so opening
--- the workbench after using the sidebar keeps every fold exactly where it was.
+-- The tab lifecycle, the editor pane and the chrome guard belong to the SHARED `lvim-ui.workspace`
+-- shell (the same primitive lvim-db / lvim-git / lvim-forge use); this module is a thin consumer that
+-- fills the regions: the LEFT sidebar with the shared `ui.explorer` tree, and the response DOCK below
+-- the editor (`ui.dock` workbench host, anchored to the editor window so it never spans under the tree).
+-- The library browser plus editor plus response pane cannot share a window with the code you were
+-- reading — hence the dedicated tab.
 --
 ---@module "lvim-rest.ui.workbench"
 
 local api = vim.api
 local config = require("lvim-rest.config")
 local explorer = require("lvim-rest.ui.explorer")
+local dock = require("lvim-rest.ui.dock")
 local bind = require("lvim-rest.store.bind")
+local workspace = require("lvim-ui.workspace")
 
 local M = {}
 
----@class LvimRestWorkbenchState
----@field tab integer?         the tabpage the workbench owns
----@field editor integer?      the CENTER window requests open into
----@field surface table?       the explorer surface (left pane)
----@field prev_tab integer?    the tabpage to return to on close
-local state = { tab = nil, editor = nil, surface = nil, prev_tab = nil }
+-- The workspace id (its tab marker). One workbench per session.
+local ID = "lvim-rest"
 
---- Is the workbench tab still alive?
----@return boolean
-function M.is_open()
-    return state.tab ~= nil and api.nvim_tabpage_is_valid(state.tab)
-end
+-- The explorer surface of the current workbench (for `focus_library`). Re-set on each open, cleared on
+-- close — the tab/editor are owned by `lvim-ui.workspace` and found by marker, this is the only local.
+---@type table?
+local sidebar = nil
 
---- The workbench's editor window, when it is open and still valid.
----@return integer?
-function M.editor_win()
-    if state.editor and api.nvim_win_is_valid(state.editor) then
-        return state.editor
-    end
-    return nil
-end
-
---- A placeholder buffer for the centre pane before anything is opened — it tells you what to press
---- rather than showing an empty unnamed buffer.
----@return integer bufnr
+--- The placeholder shown in the editor pane before a request is opened — it tells you what to press.
+---@return string[]
 local function placeholder()
-    local buf = api.nvim_create_buf(false, true)
-    vim.bo[buf].bufhidden = "wipe"
-    vim.bo[buf].filetype = "http"
-    api.nvim_buf_set_lines(buf, 0, -1, false, {
+    return {
         "# lvim-rest workbench",
         "#",
         "#   <CR>  open the request under the cursor in the library",
@@ -61,45 +45,47 @@ local function placeholder()
         "#   ?     every key the library panel has",
         "#",
         "# Requests are stored in the library — this buffer writes back on :w.",
-    })
-    vim.bo[buf].modifiable = false
-    return buf
+    }
+end
+
+--- Is the workbench tab still alive?
+---@return boolean
+function M.is_open()
+    return workspace.is_open(ID)
+end
+
+--- The workbench's editor window, when it is open and still valid.
+---@return integer?
+function M.editor_win()
+    return workspace.editor(ID)
 end
 
 --- Open (or focus) the workbench tab.
 ---@return boolean ok
 function M.open()
-    if M.is_open() then
-        api.nvim_set_current_tabpage(state.tab)
-        return true
-    end
-    state.prev_tab = api.nvim_get_current_tabpage()
-
-    -- A tab of our own: created, never stolen. `noautocmd` would suppress the FileType/BufEnter the
-    -- panes rely on, so let the events fire normally.
-    vim.cmd("tabnew")
-    state.tab = api.nvim_get_current_tabpage()
-    state.editor = api.nvim_get_current_win()
-
-    -- Centre pane: nothing is bound yet, so show the key legend.
-    pcall(api.nvim_win_set_buf, state.editor, placeholder())
-
-    -- Left pane: the library tree, through the shared explorer provider + the surface chassis.
-    local wb = config.workbench or {}
-    local ok, surf = pcall(explorer.open, {
-        side = "left",
-        width = wb.explorer_width or 34,
-        enter = false, -- open with the cursor in the EDITOR, not the tree
+    workspace.open({
+        id = ID,
+        layout = ((config.workbench or {}).dock or {}).span == "full" and "full" or "stacked",
+        editor = { placeholder = placeholder(), filetype = "http", name = "lvim-rest" },
+        -- LEFT: the library tree, through the shared explorer provider + the surface chassis.
+        sidebar = function()
+            local ok, surf = pcall(explorer.open, {
+                side = "left",
+                width = (config.workbench or {}).explorer_width or 34,
+                enter = false, -- open with the cursor in the EDITOR, not the tree
+            })
+            sidebar = ok and surf or nil
+            if not ok then
+                vim.notify("lvim-rest: could not open the library pane: " .. tostring(surf), vim.log.levels.ERROR)
+            end
+            return sidebar
+        end,
+        -- RIGHT column, below the editor: the PERSISTENT response dock, anchored to the editor window.
+        dock = function(editor)
+            pcall(dock.open_workbench, editor, ID)
+            return true
+        end,
     })
-    state.surface = ok and surf or nil
-    if not ok then
-        vim.notify("lvim-rest: could not open the library pane: " .. tostring(surf), vim.log.levels.ERROR)
-    end
-
-    -- Keep the cursor in the editor pane.
-    if M.editor_win() then
-        pcall(api.nvim_set_current_win, state.editor)
-    end
     return true
 end
 
@@ -114,12 +100,8 @@ function M.show_request(id)
     if not buf then
         return false
     end
-    local win = M.editor_win()
-    if not win then
-        -- The editor pane was closed by hand: fall back to the current window inside the tab.
-        win = api.nvim_get_current_win()
-        state.editor = win
-    end
+    -- The editor pane was closed by hand: fall back to the current window inside the tab.
+    local win = M.editor_win() or api.nvim_get_current_win()
     pcall(api.nvim_win_set_buf, win, buf)
     pcall(api.nvim_set_current_win, win)
     return true
@@ -132,33 +114,23 @@ function M.focus_library()
     if not M.is_open() then
         return
     end
-    api.nvim_set_current_tabpage(state.tab)
-    local surf = state.surface
-    if surf and surf.win and api.nvim_win_is_valid(surf.win) then
-        pcall(api.nvim_set_current_win, surf.win)
+    workspace.focus(ID)
+    if sidebar and sidebar.win and api.nvim_win_is_valid(sidebar.win) then
+        pcall(api.nvim_set_current_win, sidebar.win)
     end
 end
 
---- Close the workbench: drop its tabpage and return to the tab it was opened from.
+--- Close the workbench: drop its tabpage and return to the tab it was opened from. The response dock is
+--- torn down first (deterministic state reset) before the shared shell closes the tab.
 ---@return nil
 function M.close()
     if not M.is_open() then
         return
     end
-    local tab = state.tab
-    state.tab, state.editor, state.surface = nil, nil, nil
-    -- Closing the tabpage tears down its windows (and with them the explorer surface). Guarded:
-    -- `tabclose` on the LAST tab errors, and that must not leave the state half-cleared.
-    pcall(function()
-        if #api.nvim_list_tabpages() > 1 then
-            api.nvim_set_current_tabpage(tab)
-            vim.cmd("tabclose")
-        end
+    workspace.close(ID, function()
+        pcall(dock.close)
+        sidebar = nil
     end)
-    if state.prev_tab and api.nvim_tabpage_is_valid(state.prev_tab) then
-        pcall(api.nvim_set_current_tabpage, state.prev_tab)
-    end
-    state.prev_tab = nil
 end
 
 --- Open when closed, close when open — what a single launcher key should do.

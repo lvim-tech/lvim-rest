@@ -11,6 +11,7 @@
 
 local api = vim.api
 local surface = require("lvim-ui.surface")
+local workspace = require("lvim-ui.workspace")
 local config = require("lvim-rest.config")
 local views = require("lvim-rest.ui.views")
 local format = require("lvim-rest.format")
@@ -31,6 +32,9 @@ local state = {
     view = config.default_view,
     jq = nil, ---@type string?  active jq filter (body view)
     ts_active = false, -- whether treesitter is running on the dock buffer
+    host = "inline", ---@type "inline"|"workbench"  where the dock lives (drives its surface layout)
+    anchor = nil, ---@type integer?  the workbench editor window the dock splits (workbench host only)
+    workspace_id = nil, ---@type string?  the lvim-ui.workspace id (workbench host only; drives dock_split/toggle_layout)
 }
 
 --- Whether the dock is currently open.
@@ -99,7 +103,21 @@ end
 
 --- Re-render the current view into the dock.
 local function render()
-    if not is_open() or not state.result then
+    if not is_open() then
+        return
+    end
+    if not state.result then
+        -- The workbench dock is PERSISTENT: it exists before the first send, so it shows a hint rather
+        -- than an empty buffer. The inline dock never renders without a result (it opens on one).
+        if state.host == "workbench" then
+            paint({
+                "",
+                "  No response yet.",
+                "",
+                "  Open a request on the left, then press S to send it —",
+                "  the response appears here.",
+            }, {}, "text")
+        end
         return
     end
     -- Oversized body: the raw response was diverted to a scratch file — the body view is a notice.
@@ -287,8 +305,10 @@ local function surface_cfg()
         end,
         on_close = function()
             stop_ts()
-            state.surface, state.buf, state.win, state.result = nil, nil, nil, state.result
-            state.surface = nil
+            state.surface, state.buf, state.win = nil, nil, nil
+            -- Back to the default host so a later loose-file send opens the inline dock, not a
+            -- workbench split against a now-dead editor window.
+            state.host, state.anchor = "inline", nil
         end,
     }
     local cfg = {
@@ -298,6 +318,34 @@ local function surface_cfg()
         footer = footer_spec(),
         close_keys = { "q" },
     }
+
+    -- WORKBENCH host: the dock is a PERSISTENT split of the editor pane (not a transient float over the
+    -- tabpage edge). It anchors to the editor window so the split stays in the RIGHT column — editor on
+    -- top, response below — and its size is a fraction of THAT column, not of the whole screen.
+    if state.host == "workbench" and state.anchor and api.nvim_win_is_valid(state.anchor) then
+        local wb = config.workbench.dock or {}
+        local size = wb.size or {}
+        local sizes = { stacked = size.stacked or 0.66, full = size.full or 0.34 }
+        cfg.mode = "split"
+        cfg.persistent = true
+        cfg.close_keys = {} -- part of the layout: `q` must not tear it down
+        if wb.position == "right" and workspace.layout(state.workspace_id) == "stacked" then
+            -- STATE 1 (right variant, wide monitors): beside the editor, in the right column.
+            cfg.dock = "right"
+            cfg.anchor = state.anchor
+            local cols = math.max(20, math.floor(api.nvim_win_get_width(state.anchor) * sizes.stacked))
+            cfg.size = { width = { fixed = cols } }
+        else
+            -- The two canonical states, from the SHARED workspace geometry: "editor" anchors under the
+            -- editor (tree full-height); "full" docks full-width at the tabpage edge (tree+editor on top).
+            local g = workspace.dock_split(state.workspace_id, state.anchor, sizes)
+            cfg.dock = g.dock
+            cfg.anchor = g.anchor
+            cfg.size = g.size
+        end
+        return cfg
+    end
+
     local layout = config.dock.layout
     if layout == "float" then
         cfg.mode = "float"
@@ -367,6 +415,70 @@ function M.show(result, meta)
         return
     end
     state.surface = surface.open(surface_cfg())
+end
+
+--- Open the PERSISTENT workbench dock: a response split of the editor pane, empty until the first send.
+--- `anchor` is the workbench editor window the split stacks under; `id` is the `lvim-ui.workspace` id
+--- (drives the shared two-state geometry). Idempotent — a second call while it is up is a no-op.
+---@param anchor integer  the editor window to split
+---@param id string       the workspace id
+---@return nil
+function M.open_workbench(anchor, id)
+    if is_open() and state.host == "workbench" then
+        return
+    end
+    if is_open() then
+        M.close() -- an inline dock was up: replace it with the workbench split
+    end
+    state.host = "workbench"
+    state.anchor = anchor
+    state.workspace_id = id
+    state.result = nil
+    state.jq = nil
+    state.oversized = nil
+    state.view = config.default_view
+    state.surface = surface.open(surface_cfg())
+end
+
+--- Toggle the workbench dock between the two shared layout states — "editor" (under the editor, tree
+--- full-height) and "full" (full-width across the bottom, tree+editor on top). The STATE lives in the
+--- shared `lvim-ui.workspace` (so every consumer toggles the same way); this rebuilds the split in
+--- place, keeping the current response. No-op outside the workbench.
+---@return nil
+function M.toggle_layout()
+    if state.host ~= "workbench" or not (state.anchor and api.nvim_win_is_valid(state.anchor)) then
+        vim.notify("lvim-rest: the dock layout toggle is a workbench-only feature", vim.log.levels.WARN)
+        return
+    end
+    -- Preserve the response across the rebuild — `M.close` resets host→inline via on_close, so restore
+    -- host/anchor/result BEFORE reopening (the reopen's provider.update renders whatever is in state).
+    local keep = {
+        result = state.result,
+        meta = state.meta,
+        view = state.view,
+        jq = state.jq,
+        oversized = state.oversized,
+        anchor = state.anchor,
+        id = state.workspace_id,
+    }
+    workspace.toggle_layout(state.workspace_id, function(new_state)
+        M.close()
+        state.host = "workbench"
+        state.anchor = keep.anchor
+        state.workspace_id = keep.id
+        state.result, state.meta, state.view, state.jq, state.oversized =
+            keep.result, keep.meta, keep.view, keep.jq, keep.oversized
+        state.surface = surface.open(surface_cfg())
+        if state.result and state.surface then
+            if state.surface.set_header then
+                pcall(state.surface.set_header, header_spec())
+            end
+            if state.surface.set_title then
+                pcall(state.surface.set_title, title_box())
+            end
+        end
+        vim.notify("lvim-rest: dock layout → " .. new_state, vim.log.levels.INFO)
+    end)
 end
 
 --- Close the dock.

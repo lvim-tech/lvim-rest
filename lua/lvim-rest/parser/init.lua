@@ -63,7 +63,7 @@ local METHODS = {
 ---@field prompt        LvimRestPrompt[]     `# @prompt var [desc]` interactive inputs
 ---@field timeout       integer?             `# @timeout ms`
 ---@field auth          LvimRestAuth?        `# @auth <scheme> [args…]`
----@field grpc          { proto: string[], import: string[] }  `# @grpc-proto` / `# @grpc-import`
+---@field grpc          { proto: string[], import: string[], authority: string?, insecure: boolean? }  `# @grpc-*`
 ---@field no_log        boolean?             `# @no-log`
 ---@field no_cookie_jar boolean?             `# @no-cookie-jar`
 ---@field accept        string?              `# @accept chunked` (stream mode)
@@ -102,6 +102,7 @@ local METHODS = {
 ---@field http_version   string?            e.g. "1.1", "2"
 ---@field headers        LvimRestHeader[]   ordered headers
 ---@field body           string?            raw body (nil when empty)
+---@field body_line      integer?           1-based line where the body (or its `< file` include) begins
 ---@field body_file      string?            `< ./file` body-from-file path
 ---@field body_file_var  boolean            `<@ ./file` — substitute `{{vars}}` in the included file
 ---@field save_to        string?            `>>`/`>>!` response-redirect path
@@ -146,6 +147,35 @@ local function new_request()
         sep_line = 0,
         end_line = 0,
     }
+end
+
+--- Split whitespace-delimited args, treating a `{{ … }}` group as ONE token even when it contains
+--- spaces — so `# @auth bearer {{vault "rest/x"}}` yields `{ "bearer", '{{vault "rest/x"}}' }`, not a
+--- token split down the middle. Used for the auth directive, where a vaulted credential is a
+--- space-carrying reference.
+---@param s string
+---@return string[]
+local function split_args(s)
+    local out, i, n = {}, 1, #s
+    while i <= n do
+        while i <= n and s:sub(i, i):match("%s") do
+            i = i + 1
+        end
+        if i > n then
+            break
+        end
+        local start = i
+        while i <= n and not s:sub(i, i):match("%s") do
+            if s:sub(i, i + 1) == "{{" then
+                local close = s:find("}}", i + 2, true)
+                i = close and (close + 2) or (n + 1)
+            else
+                i = i + 1
+            end
+        end
+        out[#out + 1] = s:sub(start, i - 1)
+    end
+    return out
 end
 
 --- Try to read a request line (`METHOD url [HTTP/x.y]`, or a bare URL implying GET).
@@ -209,8 +239,9 @@ local function apply_directive(req, payload, lnum)
         d.timeout = tonumber(rest)
     elseif lkey == "auth" then
         -- The arguments keep their `{{vars}}` — they are resolved with the rest of the request, so
-        -- `# @auth bearer {{token}}` reads the same variables everything else does.
-        local words = vim.split(rest, "%s+")
+        -- `# @auth bearer {{token}}` reads the same variables everything else does. `split_args` keeps
+        -- a `{{vault "rest/x"}}` reference (which carries a space) as ONE argument.
+        local words = split_args(rest)
         local scheme = table.remove(words, 1)
         if scheme and scheme ~= "" then
             d.auth = { scheme = scheme:lower(), args = words }
@@ -224,6 +255,14 @@ local function apply_directive(req, payload, lnum)
         if rest ~= "" then
             d.grpc.import[#d.grpc.import + 1] = rest
         end
+    elseif lkey == "grpc-authority" then
+        -- TLS server-name override: reach a TLS gRPC server through a tunnel (connect to localhost,
+        -- verify the server's real domain against the public roots).
+        if rest ~= "" then
+            d.grpc.authority = rest
+        end
+    elseif lkey == "grpc-insecure" then
+        d.grpc.insecure = true
     elseif lkey == "no-log" then
         d.no_log = true
     elseif lkey == "no-cookie-jar" then
@@ -364,7 +403,11 @@ function M.parse(text)
                 local var, fpath = trimmed:match("^(<@?)%s+(.+)$")
                 cur.body_file = fpath
                 cur.body_file_var = var == "<@"
+                cur.body_line = cur.body_line or i
             else
+                -- The first content line anchors the body (json decode diagnostics et al.); the parser
+                -- already records source lines for directives/headers, so the body gets one too.
+                cur.body_line = cur.body_line or i
                 body_lines[#body_lines + 1] = line
             end
         else

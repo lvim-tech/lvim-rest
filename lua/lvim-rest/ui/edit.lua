@@ -344,6 +344,44 @@ function Editor:set_directive_line(lnum, key, value)
     self:replace(lnum, directive_line(key, value))
 end
 
+-- ── the body ──────────────────────────────────────────────────────────────────
+
+--- Replace the request's BODY (the region after the blank line that separates it from the headers)
+--- with `content` — granular, touching only those lines so the request line, headers, directives and
+--- the separator to the next request stay put. `content` may be multi-line; "" clears the body. When
+--- the request has no body yet, a blank separator (if absent) and the body are inserted after the
+--- headers. The anchor sits on the request line above, so it is never disturbed.
+---@param content string
+---@return boolean ok
+function Editor:set_body(content)
+    local req = self:request()
+    if not req then
+        return false
+    end
+    local new_lines = (content == "") and {} or vim.split(content, "\n", { plain = true })
+    if req.body_line then
+        api.nvim_buf_set_lines(self.buf, req.body_line - 1, req.end_line, false, new_lines)
+        return true
+    end
+    if #new_lines == 0 then
+        return true -- no body and nothing to add
+    end
+    local after = self:last_header_line() or req.line -- 1-based
+    local following = api.nvim_buf_get_lines(self.buf, after, after + 1, false)[1]
+    if following ~= nil and vim.trim(following) == "" then
+        -- A separator blank already follows the headers: put the body right after it.
+        api.nvim_buf_set_lines(self.buf, after + 1, after + 1, false, new_lines)
+    else
+        -- No separator: insert one, then the body.
+        local block = { "" }
+        for _, l in ipairs(new_lines) do
+            block[#block + 1] = l
+        end
+        api.nvim_buf_set_lines(self.buf, after, after, false, block)
+    end
+    return true
+end
+
 -- ── lifecycle ───────────────────────────────────────────────────────────────
 
 --- Drop the anchor.

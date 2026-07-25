@@ -50,6 +50,13 @@ pub struct GrpcParams {
     pub import_paths: Vec<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// TLS server-name override for the certificate check — reach a TLS server through a tunnel
+    /// (connect to `localhost` but verify its real domain). Empty = use the URL's host.
+    #[serde(default)]
+    pub tls_authority: String,
+    /// Skip TLS certificate verification entirely (like `curl -k`) — for self-signed / dev servers.
+    #[serde(default)]
+    pub insecure: bool,
     /// `grpc.list` only: when false, just the service names.
     #[serde(default)]
     pub methods: bool,
@@ -293,6 +300,49 @@ fn endpoint_of(url: &str) -> String {
     }
 }
 
+/// Build a tonic `Endpoint`, enabling TLS for an `https://` URL. `tls_authority` overrides the SNI /
+/// certificate name — the way to reach a TLS server through a tunnel: connect to `localhost:port`
+/// while verifying the server's REAL domain against the public roots (webpki). `insecure` is not yet
+/// supported here (a custom rustls verifier); name the domain with `@grpc-authority` instead.
+fn build_endpoint(
+    url: &str,
+    timeout_ms: Option<u64>,
+    tls_authority: &str,
+    insecure: bool,
+) -> Result<tonic::transport::Endpoint> {
+    use tonic::transport::{ClientTlsConfig, Endpoint};
+    // TLS is used when the URL says `https://`, or an authority override / insecure is requested — so
+    // a bare `host:port` request line can still reach a TLS server just by naming `# @grpc-authority`.
+    let want_tls = url.starts_with("https://") || !tls_authority.is_empty() || insecure;
+    let uri = if want_tls {
+        if url.starts_with("https://") {
+            url.to_string()
+        } else if let Some(rest) = url.strip_prefix("http://") {
+            format!("https://{rest}")
+        } else {
+            format!("https://{url}")
+        }
+    } else {
+        endpoint_of(url)
+    };
+    let mut ep = Endpoint::from_shared(uri)?
+        .timeout(std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)));
+    if want_tls {
+        if insecure {
+            return Err(anyhow!(
+                "insecure gRPC TLS is not supported yet — name the certificate domain with \
+                 `# @grpc-authority <domain>` (e.g. reach a tunnelled server by its real host)"
+            ));
+        }
+        let mut tls = ClientTlsConfig::new().with_webpki_roots();
+        if !tls_authority.is_empty() {
+            tls = tls.domain_name(tls_authority.to_string());
+        }
+        ep = ep.tls_config(tls)?;
+    }
+    Ok(ep)
+}
+
 fn find_method(pool: &DescriptorPool, service: &str, method: &str) -> Result<MethodDescriptor> {
     let svc = pool
         .get_service_by_name(service)
@@ -353,10 +403,7 @@ async fn call_inner(p: &GrpcParams) -> Result<String> {
     de.end()?;
     let request_bytes = request_msg.encode_to_vec();
 
-    let channel = tonic::transport::Endpoint::from_shared(endpoint)?
-        .timeout(std::time::Duration::from_millis(
-            p.timeout_ms.unwrap_or(30_000),
-        ))
+    let channel = build_endpoint(&p.url, p.timeout_ms, &p.tls_authority, p.insecure)?
         .connect()
         .await
         .context("could not connect")?;

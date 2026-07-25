@@ -460,6 +460,8 @@ local function run_grpc(resolved, cb)
         metadata = metadata,
         proto = g.proto,
         import_paths = g.import,
+        tls_authority = g.authority or "",
+        insecure = g.insecure == true,
         timeout_ms = resolved.directives.timeout or config.request.timeout,
     }, function(result, err)
         vim.schedule(function()

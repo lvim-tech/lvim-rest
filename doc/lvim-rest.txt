@@ -365,9 +365,19 @@ value either moves it into lvim-keyring and rewrites it to `{{vault "key"}}`
 
                                                        *:LvimRest workbench*
 `:LvimRest workbench` opens a tab of its own — the library tree beside the
-request editor. `:LvimRest library` instead docks just the tree as a sidebar
-next to whatever you are already doing; both host the SAME tree, so folds stay
-where you left them.
+request editor, with a persistent response dock. `:LvimRest library` instead
+docks just the tree as a sidebar next to whatever you are already doing; both
+host the SAME tree, so folds stay where you left them. The tab lifecycle,
+editor pane and chrome are the shared `lvim-ui.workspace` shell.
+
+                                                       *:LvimRest dock*
+`:LvimRest dock` toggles the workbench between two layout states:
+    state 1  the tree is FULL-HEIGHT on the left; the right column stacks the
+             editor (top, ~1/3) over the response dock (bottom, ~2/3).
+    state 2  the tree and editor share the TOP ~2/3; the result is a FULL-WIDTH
+             strip across the BOTTOM ~1/3 (the classic query-tool shape).
+`workbench.dock` configures it: `position` ("bottom"|"right"), the starting
+`span` ("stacked"|"full"), and per-state `size` ({ stacked, full } fractions).
 
 Keys in the tree: >
 
@@ -473,8 +483,9 @@ library row is not duplicated — `:w` updates it.
 
                                                               *:LvimRest*
 :LvimRest                 print status (engine, in-flight count, subcommands)
-:LvimRest workbench       toggle the full-tab workbench (library + editor)
+:LvimRest workbench       toggle the full-tab workbench (library + editor + response)
 :LvimRest library         dock the library tree as a sidebar
+:LvimRest dock            toggle the workbench layout (stacked <-> full-width result)
 :LvimRest run [datafile]  run the collection, once per data-file row
 :LvimRest send            send the request under the cursor
 :LvimRest all             send every request in the buffer
@@ -556,11 +567,12 @@ Buffer-local on `http` / `rest` buffers (all configurable via `keys`):
 16. CONFIGURATION                                          *lvim-rest-config*
 
 See the README for the full default `setup()` block; it is kept in sync with
-`lua/lvim-rest/config.lua`. Notable keys: `backend`, `daemon`, `dock.layout`,
-`default_view`, `env`, `request` (timeout / redirects / http_version /
-send_all_delay / chain), `format` (indent / jq_bin / xmllint_bin / max_size),
-`library`, `vault`, `history`, `scrub_secrets`, `prompt.cache`,
-`inline_status`, `keys`, `icons`.
+`lua/lvim-rest/config.lua`. Notable keys: `backend`, `daemon`,
+`workbench` (explorer_width / dock.position / dock.span / dock.size),
+`dock.layout` (the inline loose-file dock), `default_view`, `env`,
+`request` (timeout / redirects / http_version / send_all_delay / chain),
+`format` (indent / jq_bin / xmllint_bin / max_size), `library`, `vault`,
+`history`, `scrub_secrets`, `prompt.cache`, `inline_status`, `keys`, `icons`.
 
   daemon.autostart        Spawn the daemon on first use. `false` = never spawn
                           it: HTTP/GraphQL run on curl and the daemon-only

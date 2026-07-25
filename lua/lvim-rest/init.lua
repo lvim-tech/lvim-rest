@@ -117,6 +117,11 @@ local subcommands = {
     library = function()
         require("lvim-rest.ui.explorer").open({ enter = true })
     end,
+    -- Toggle the workbench response dock between spanning UNDER THE EDITOR only (tree full-height) and
+    -- FULL width under tree+editor (the lvim-db shape). Workbench-only.
+    dock = function()
+        require("lvim-rest.ui.dock").toggle_layout()
+    end,
     -- Run a whole collection. `arg` is an optional data file (json array / csv with a header) —
     -- one pass per row, its values entering the top-priority `data` variable scope.
     run = function(arg)
@@ -419,6 +424,7 @@ function M.setup(opts)
         pattern = FILETYPES,
         callback = function(ev)
             attach_buffer(ev.buf)
+            require("lvim-rest.spec.diagnostics").attach(ev.buf) -- live structural validation
         end,
     })
     -- Clean up the inline status lanes when a buffer is wiped.
@@ -429,6 +435,10 @@ function M.setup(opts)
             require("lvim-rest.ui.inline").clear_all(ev.buf)
         end,
     })
+
+    -- Register the lvim-cmp completion source (directives / auth schemes / methods / enum values from
+    -- the shared spec). No-op when lvim-cmp is absent.
+    require("lvim-rest.cmp").setup()
 
     -- NOTE: the `http` / `graphql` treesitter grammars are for HIGHLIGHTING only (the execution
     -- parser never depends on them). lvim-ts has no runtime grammar-add API, so a user who wants the

@@ -15,9 +15,14 @@
 ---@field autostart     boolean   Spawn the daemon lazily on the first daemon-backed request; `false` keeps the editor process-free (HTTP/GraphQL run on curl, the daemon-only protocols report it is off)
 ---@field idle_timeout  integer   Milliseconds of inactivity before the idle daemon is stopped (0 = keep it running); a live WebSocket session holds it open
 
+---@class LvimRestWorkbenchDockSize
+---@field stacked number  span="stacked" (state 1): fraction of the RIGHT COLUMN the response takes (editor gets the rest) — 2/3 by default
+---@field full    number  span="full" (state 2): fraction of the WHOLE TAB the full-width result takes — 1/3 by default, so tree+editor keep the top 2/3
+
 ---@class LvimRestWorkbenchDock
----@field position "right"|"bottom"  The response dock side inside the workbench tab
----@field size     number            Fraction of the workbench reserved for the dock
+---@field position "right"|"bottom"   Side for the state-1 dock (bottom = under the editor; right = beside it)
+---@field span     "stacked"|"full"   The layout STATE. state 1 "stacked": tree full-height, right column editor(top)/response(bottom). state 2 "full": tree+editor on top, result full-width below. `:LvimRest dock` toggles them.
+---@field size     LvimRestWorkbenchDockSize  Per-state height fractions
 
 ---@class LvimRestWorkbenchConfig
 ---@field explorer_width integer                LEFT collection-tree width (columns)
@@ -76,8 +81,10 @@
 ---@field delete string  delete the row under the cursor
 ---@field toggle string  comment a header line out / back in
 ---@field rename string  edit the row's NAME (a param name, a header name)
----@field send   string  send the request and close the panel
----@field help   string  the panel's key help
+---@field send      string  send the request and close the panel
+---@field keyring   string  store the focused Auth secret in the keyring (→ a `{{vault "…"}}` reference)
+---@field edit_body string  open the request's body in a multi-line scratch editor
+---@field help      string  the panel's key help
 
 ---@class LvimRestOptionsTab
 ---@field label string
@@ -86,7 +93,7 @@
 ---@class LvimRestOptionsConfig
 ---@field layout "float"|"area"|"bottom"  Panel layout (a per-command token overrides it)
 ---@field keys   LvimRestOptionsKeys
----@field tabs   { params: LvimRestOptionsTab, headers: LvimRestOptionsTab, settings: LvimRestOptionsTab }
+---@field tabs   { params: LvimRestOptionsTab, headers: LvimRestOptionsTab, auth: LvimRestOptionsTab, body: LvimRestOptionsTab, settings: LvimRestOptionsTab }
 
 ---@class LvimRestUiConfig
 ---@field options LvimRestOptionsConfig  The request-options form (`:LvimRest options`)
@@ -149,9 +156,18 @@
 ---@field ui            LvimRestUiConfig         The interactive panels
 ---@field keys          LvimRestKeys             Buffer-local maps for http/rest filetypes (all configurable)
 ---@field icons         LvimRestIcons
+---@field spec?         table                    Overrides merged over the shipped `.http` schema (spec/schema.lua):
+---                                              adds/replaces auth variants, body types, directives — appears in the
+---                                              panel, the validator AND cmp at once (see lvim-rest.spec).
+---@field diagnostics   { enabled: boolean, debounce: integer }  Live structural validation of hand-written `.http`.
 
 ---@type LvimRestConfig
 return {
+    -- Live STRUCTURAL validation of hand-written `.http` (unknown method fields, missing required auth
+    -- args, malformed JSON body, near-miss directives) via vim.diagnostic — the same spec/schema that
+    -- drives the options panel. Debounced while typing; semantic checks stay with send. `enabled=false`
+    -- turns the squiggles off entirely.
+    diagnostics = { enabled = true, debounce = 300 },
     -- Execution engine: "auto" = the daemon when built, else curl for HTTP with a one-time notice;
     -- "daemon" = require lvim-rest-core; "curl" = the pure-curl HTTP/GraphQL fallback only.
     backend = "auto",
@@ -160,12 +176,17 @@ return {
         autostart = true,
         idle_timeout = 300000,
     },
-    -- The dedicated full-tab IDE face (`:LvimRest`): LEFT explorer / CENTER .http editor / dock.
+    -- The dedicated full-tab IDE face (`:LvimRest`): LEFT explorer (full height) / editor + response
+    -- dock stacked in the RIGHT column — the editor on top, the response below it.
     workbench = {
         explorer_width = 34,
         dock = {
-            position = "right", -- "right" | "bottom"
-            size = 0.42, -- fraction of the workbench for the dock
+            position = "bottom", -- state-1 side: "bottom" (below the editor) | "right" (beside it)
+            span = "stacked", -- start in state 1: "stacked" (tree full-height) — toggle to "full" with :LvimRest dock
+            size = {
+                stacked = 0.66, -- state 1: response = 2/3 of the right column (editor keeps 1/3 on top)
+                full = 0.34, -- state 2: full-width result = 1/3 of the whole tab (tree+editor keep the top 2/3)
+            },
         },
     },
     -- The inline dock shown when sending from a loose .http file (not the workbench).
@@ -212,10 +233,22 @@ return {
     ui = {
         options = {
             layout = "float", -- "float" | "area" | "bottom"
-            keys = { add = "a", delete = "d", toggle = "t", rename = "r", send = "s", help = "?" },
+            keys = {
+                add = "a",
+                delete = "d",
+                toggle = "t",
+                rename = "r",
+                send = "s",
+                keyring = "v",
+                edit_body = "e",
+                help = "?",
+            },
             tabs = {
                 params = { label = "Params", icon = "󰘲" },
                 headers = { label = "Headers", icon = "󰈻" },
+                auth = { label = "Auth", icon = "󰌆" },
+                body = { label = "Body", icon = "󰈔" },
+                grpc = { label = "gRPC", icon = "󰢌" },
                 settings = { label = "Settings", icon = "󰒓" },
             },
         },

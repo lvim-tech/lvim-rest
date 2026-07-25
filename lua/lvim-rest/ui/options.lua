@@ -19,6 +19,7 @@
 local api = vim.api
 local config = require("lvim-rest.config")
 local edit = require("lvim-rest.ui.edit")
+local spec = require("lvim-rest.spec")
 local highlight = require("lvim-utils.highlight")
 local ui = require("lvim-ui")
 
@@ -148,6 +149,298 @@ local function headers_rows()
         }
     end
     return rows
+end
+
+--- The spec read-context for the current request: the buffer + its path (env lookups, dynamic resolve).
+---@return LvimRestSpecCtx
+local function spec_ctx()
+    local ed = state.editor
+    local buf = ed and ed.buf
+    return { buf = buf, path = buf and api.nvim_buf_get_name(buf) or nil }
+end
+
+--- The Auth tab: the `# @auth` scheme select + the selected scheme's fields, ALL from the shared
+--- spec (`lvim-rest.spec`) so it can never disagree with the validator. Every edit reassembles the
+--- one directive line through the write-back engine — the panel invents no auth syntax of its own.
+---@param req LvimRestRequest
+---@return table[]
+local function auth_rows(req)
+    local disc = spec.schema().auth.discriminator.key
+    local ctx = spec_ctx()
+    -- Warm any dynamic select options (the oauth2 profile ids) and repaint when they land.
+    spec.resolve_options("auth", req, ctx, function()
+        M.refresh()
+    end)
+    local rows = {}
+    for _, sr in ipairs(spec.rows("auth", req, ctx)) do
+        local field = sr.field
+        local r = vim.tbl_extend("force", {}, sr.row)
+        if field.key == disc then
+            -- The scheme select: switch schemes. "none" removes the directive; any other writes the
+            -- bare `# @auth <scheme>` and the rebuild shows that scheme's (empty) fields.
+            r.name = "auth:scheme"
+            r.run = function(value)
+                local ed = state.editor
+                if not ed then
+                    return
+                end
+                if value == "none" then
+                    ed:set_directive("auth", nil)
+                else
+                    ed:set_directive("auth", spec.assemble_auth(value, {}))
+                end
+                M.refresh()
+            end
+        else
+            -- A field of the selected scheme: reassemble the whole line from the live values with this
+            -- one changed, then write it back. Secret fields are eligible for the keyring footer button.
+            r.name = "auth:field:" .. field.key
+            r.secret = field.secret == true
+            r.run = function(value)
+                local ed = state.editor
+                if not ed then
+                    return
+                end
+                local cur = ed:request() or req
+                local scheme = spec.variant("auth", cur)
+                local values = spec.values("auth", cur)
+                values[field.key] = value
+                ed:set_directive("auth", spec.assemble_auth(scheme, values))
+                M.refresh()
+            end
+        end
+        rows[#rows + 1] = r
+    end
+    return rows
+end
+
+--- Ensure the header a body variant declares (`Content-Type`) is present + enabled — the CONSEQUENCE
+--- of picking that body type, written as an ordinary header line (never hidden state).
+---@param ed LvimRestEditor
+---@param variant table
+local function ensure_variant_headers(ed, variant)
+    if not variant.headers then
+        return
+    end
+    for name, value in pairs(variant.headers) do
+        local has = false
+        for _, h in ipairs(ed:headers()) do
+            if h.enabled and h.name:lower() == name:lower() then
+                has = true
+                break
+            end
+        end
+        if not has then
+            ed:add_header(name, value)
+        end
+    end
+end
+
+--- Apply the consequences of switching the body TYPE (the inferred discriminator carries no token, so
+--- flipping it writes real buffer changes: the Content-Type header, a starter body, or the include
+--- marker — never a phantom directive).
+---@param ed LvimRestEditor
+---@param kind string
+local function apply_body_kind(ed, kind)
+    local variant = spec.schema().body.variants[kind] or {}
+    ensure_variant_headers(ed, variant) -- header first, so set_body's insert point is settled
+    if kind == "none" then
+        ed:set_body("")
+    elseif kind == "file" then
+        local req = ed:request()
+        if not (req and req.body_file) then
+            ed:set_body("< ./body") -- a placeholder path so `detect` reads this as the file variant
+        end
+    elseif kind == "json" then
+        local req = ed:request()
+        if not req or not req.body or req.body == "" then
+            ed:set_body("{}")
+        end
+    end
+end
+
+--- The Body tab: the type select (INFERRED — flipping it writes consequences) + the active variant's
+--- fields, all from the shared spec. json/graphql/raw/form edit the body block; file edits the
+--- `< path` include marker.
+---@param req LvimRestRequest
+---@return table[]
+local function body_rows(req)
+    local disc = spec.schema().body.discriminator.key
+    local rows = {}
+    for _, sr in ipairs(spec.rows("body", req, spec_ctx())) do
+        local field = sr.field
+        local r = vim.tbl_extend("force", {}, sr.row)
+        if field.key == disc then
+            r.name = "body:kind"
+            r.run = function(value)
+                if state.editor then
+                    apply_body_kind(state.editor, value)
+                    M.refresh()
+                end
+            end
+        elseif field.key == "path" then
+            r.name = "body:path"
+            r.run = function(value)
+                local ed = state.editor
+                if not ed then
+                    return
+                end
+                local cur = ed:request() or req
+                local sub = spec.values("body", cur).substitute == true
+                ed:set_body(("%s %s"):format(sub and "<@" or "<", value))
+                M.refresh()
+            end
+        elseif field.key == "substitute" then
+            r.name = "body:substitute"
+            r.run = function(value)
+                local ed = state.editor
+                if not ed then
+                    return
+                end
+                local cur = ed:request() or req
+                local path = spec.values("body", cur).path or ""
+                if path ~= "" then
+                    ed:set_body(("%s %s"):format((value == true or value == "true") and "<@" or "<", path))
+                    M.refresh()
+                end
+            end
+        else
+            -- json / graphql / grpc message / form / raw: the body is multi-line, so it CANNOT be an
+            -- inline value row — nvim_buf_set_lines rejects embedded newlines when the panel paints it.
+            -- The row is an ACTION showing a one-line preview; <CR> opens the scratch body editor.
+            local raw = type(r.value) == "string" and r.value or ""
+            local preview = (raw:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", ""))
+            if preview == "" then
+                preview = "(empty) — press " .. config.ui.options.keys.edit_body .. " to edit"
+            elseif vim.fn.strdisplaywidth(preview) > 60 then
+                preview = vim.fn.strcharpart(preview, 0, 60) .. "…"
+            end
+            r = {
+                type = "action",
+                name = "body:content:" .. field.key,
+                icon = sr.row.icon,
+                label = (field.label or field.key) .. ":  " .. preview,
+                run = function()
+                    local ed = state.editor
+                    if not ed then
+                        return
+                    end
+                    local buf, lnum = ed.buf, ed:anchor()
+                    M.close()
+                    vim.schedule(function()
+                        require("lvim-rest.ui.body_editor").open(buf, lnum)
+                    end)
+                end,
+            }
+        end
+        rows[#rows + 1] = r
+    end
+    return rows
+end
+
+--- Split a gRPC request URL into endpoint / service / method: `host:port/pkg.Service/Method`.
+---@param url string
+---@return string endpoint, string service, string method
+local function parse_grpc(url)
+    local endpoint, rest = url:match("^([^/]+)/(.+)$")
+    if not endpoint then
+        return url, "", ""
+    end
+    local service, method = rest:match("^(.+)/([^/]+)$")
+    if not service then
+        return endpoint, rest, ""
+    end
+    return endpoint, service, method
+end
+
+--- Reassemble a gRPC URL from its parts (empty parts dropped).
+---@param endpoint string
+---@param service string
+---@param method string
+---@return string
+local function build_grpc(endpoint, service, method)
+    local u = endpoint
+    if service ~= "" then
+        u = u .. "/" .. service
+    end
+    if method ~= "" then
+        u = u .. "/" .. method
+    end
+    return u
+end
+
+--- The gRPC tab: the endpoint / service / method of the request line. When the daemon can reflect the
+--- request's `.proto` files (or the server), service and method are SELECTS of the real vocabulary;
+--- otherwise they are plain text fields (always editable). Each edit rewrites exactly its URL segment
+--- through the write-back engine. Only a GRPC request has this tab.
+---@param req LvimRestRequest
+---@return table[]
+local function grpc_rows(req)
+    if req.method ~= "GRPC" then
+        return { note("not a gRPC request — its request line must start with GRPC", "grpc") }
+    end
+    local grpc = require("lvim-rest.spec.grpc")
+    local ctx = spec_ctx()
+    local refl = grpc.cached(req, ctx)
+    -- Warm the cache ONLY when cold — otherwise a warm hit calls the callback synchronously and
+    -- M.refresh → grpc_rows → reflect → refresh would loop. On the repaint after a cold resolve lands,
+    -- the cache is warm, so no further reflect is kicked.
+    if not refl then
+        grpc.reflect(req, ctx, function()
+            M.refresh()
+        end)
+    end
+    local endpoint, service, method = parse_grpc(req.url or "")
+
+    local function setter(which)
+        return function(value)
+            local ed = state.editor
+            if not ed then
+                return
+            end
+            local e, s, m = parse_grpc((ed:request() or req).url or "")
+            if which == "endpoint" then
+                e = value
+            elseif which == "service" then
+                s, m = value, "" -- a new service invalidates the old method
+            else
+                m = value
+            end
+            ed:set_request_line("GRPC", build_grpc(e, s, m))
+            M.refresh()
+        end
+    end
+
+    local svc_row = { name = "grpc:service", label = "Service", value = service, run = setter("service") }
+    if refl and refl.services and #refl.services > 0 then
+        svc_row.type, svc_row.options = "select", refl.services
+    else
+        svc_row.type = "string"
+    end
+    local mth_row = { name = "grpc:method", label = "Method", value = method, run = setter("method") }
+    local methods = refl and refl.methods and refl.methods[service]
+    if methods and #methods > 0 then
+        mth_row.type, mth_row.options = "select", methods
+    else
+        mth_row.type = "string"
+    end
+
+    return {
+        {
+            type = "string",
+            name = "grpc:endpoint",
+            label = "Endpoint (host:port)",
+            value = endpoint,
+            run = setter("endpoint"),
+        },
+        svc_row,
+        mth_row,
+        note(
+            refl and "services + methods from the request's protos / reflection"
+                or "name a .proto with @grpc-proto (Settings) for service/method lists",
+            "grpc"
+        ),
+    }
 end
 
 -- The REPEATABLE directives, as one declarative table: the accordion label, the directive key, how
@@ -351,6 +644,17 @@ end
 
 -- ── the panel ───────────────────────────────────────────────────────────────
 
+--- Tab name → its row builder, so M.open and M.refresh agree and a conditional tab (gRPC) is handled
+--- by presence, not a fixed index.
+M._builders = {
+    params = params_rows,
+    headers = headers_rows,
+    auth = auth_rows,
+    body = body_rows,
+    grpc = grpc_rows,
+    settings = settings_rows,
+}
+
 --- Rebuild every tab's rows from a fresh parse, keeping the cursor row. The panel always shows what
 --- the parser sees — which is the whole point of writing back into the buffer instead of a store.
 function M.refresh()
@@ -363,9 +667,13 @@ function M.refresh()
         return M.close()
     end
     local idx = h.cursor_index()
-    state.tabs[1].rows = params_rows(req)
-    state.tabs[2].rows = headers_rows()
-    state.tabs[3].rows = settings_rows(req)
+    -- Rebuild each present tab's rows by NAME (the gRPC tab is only present for a GRPC request).
+    for _, tab in ipairs(state.tabs) do
+        local b = M._builders[tab.name]
+        if b then
+            tab.rows = b(req)
+        end
+    end
     h.recalc()
     h.focus_index(idx)
 end
@@ -569,6 +877,20 @@ local function action_rename()
     notify("nothing to rename on this row", vim.log.levels.WARN)
 end
 
+--- Open the request's body in a multi-line scratch editor (json/graphql highlighted). The panel
+--- closes first — the body is best edited in a real buffer, and reopened options reflect the change.
+local function action_edit_body()
+    local ed = state.editor
+    if not ed then
+        return
+    end
+    local buf, lnum = ed.buf, ed:anchor()
+    M.close()
+    vim.schedule(function()
+        require("lvim-rest.ui.body_editor").open(buf, lnum)
+    end)
+end
+
 --- Send the request the form is editing, and close (the response belongs in the dock, not here).
 local function action_send()
     local ed = state.editor
@@ -579,6 +901,66 @@ local function action_send()
     M.close()
     vim.schedule(function()
         require("lvim-rest.runner").send(buf, lnum)
+    end)
+end
+
+--- Move the focused Auth SECRET field into the lvim-keyring wallet, then rewrite it in the `# @auth`
+--- line to a `{{vault "…"}}` reference — so the credential lives encrypted and the buffer keeps only
+--- the marker (the lvim-db `store_in_keyring` pattern, over the shared vault seam). Only acts on an
+--- Auth secret field with a literal (non-templated) value.
+local function action_keyring()
+    local ed = state.editor
+    if not ed then
+        return
+    end
+    local fkey = focused_name():match("^auth:field:(.+)$")
+    if not fkey then
+        return notify("move to an Auth secret field (Password / Token / …) first", vim.log.levels.WARN)
+    end
+    local req = ed:request()
+    if not req then
+        return
+    end
+    local scheme = spec.variant("auth", req)
+    local variant = spec.schema().auth.variants[scheme] or {}
+    local field
+    for _, f in ipairs(variant.fields or {}) do
+        if f.key == fkey then
+            field = f
+            break
+        end
+    end
+    if not (field and field.secret) then
+        return notify("this Auth field is not a secret", vim.log.levels.WARN)
+    end
+    local vault = require("lvim-rest.vars.vault")
+    if not vault.available() then
+        return notify("lvim-keyring is not installed", vim.log.levels.WARN)
+    end
+    local secret = tostring(spec.values("auth", req)[fkey] or "")
+    if secret == "" then
+        return notify("no value in the Auth field to store", vim.log.levels.WARN)
+    end
+    if secret:match("^%s*{{") then
+        return notify("the field is already a {{ … }} reference", vim.log.levels.INFO)
+    end
+    local base = (req.name and req.name ~= "" and req.name:gsub("%s+", "-")) or "request"
+    local key = vault.key(base .. "/" .. fkey)
+    vault.store(key, secret, function(ok, err)
+        if not ok then
+            return notify("keyring — " .. (err or "store failed"), vim.log.levels.WARN)
+        end
+        vim.schedule(function()
+            local cur = state.editor and state.editor:request()
+            if not cur then
+                return
+            end
+            local values = spec.values("auth", cur)
+            values[fkey] = ('{{vault "%s"}}'):format(key)
+            state.editor:set_directive("auth", spec.assemble_auth(scheme, values))
+            M.refresh()
+            notify(('stored in the keyring — %s is now {{vault "%s"}}'):format(field.label or fkey, key))
+        end)
     end)
 end
 
@@ -610,6 +992,18 @@ ACTIONS = {
     },
     { key = config.ui.options.keys.rename, name = "rename", desc = "rename a parameter / header", fn = action_rename },
     { key = config.ui.options.keys.send, name = "send", desc = "send this request and close", fn = action_send },
+    {
+        key = config.ui.options.keys.keyring,
+        name = "keyring",
+        desc = "store the focused Auth secret in the keyring (rewrites it to a vault reference)",
+        fn = action_keyring,
+    },
+    {
+        key = config.ui.options.keys.edit_body,
+        name = "body",
+        desc = "edit the request body in a multi-line scratch editor",
+        fn = action_edit_body,
+    },
 }
 
 --- Bind the panel keys on its buffer.
@@ -657,11 +1051,18 @@ function M.open(bufnr, lnum, layout)
         state.layout = layout
     end
     local t = config.ui.options.tabs
-    state.tabs = {
-        { label = t.params.label, icon = t.params.icon, name = "params", menu = true, rows = params_rows(req) },
-        { label = t.headers.label, icon = t.headers.icon, name = "headers", menu = true, rows = headers_rows() },
-        { label = t.settings.label, icon = t.settings.icon, name = "settings", menu = true, rows = settings_rows(req) },
-    }
+    -- The tab set: the common ones, plus a gRPC tab ONLY for a GRPC request (built by name so refresh
+    -- and open never drift). Settings is always last.
+    local names = { "params", "headers", "auth", "body" }
+    if req.method == "GRPC" then
+        names[#names + 1] = "grpc"
+    end
+    names[#names + 1] = "settings"
+    state.tabs = {}
+    for _, name in ipairs(names) do
+        state.tabs[#state.tabs + 1] =
+            { label = t[name].label, icon = t[name].icon, name = name, menu = true, rows = M._builders[name](req) }
+    end
     local footer = {}
     for _, a in ipairs(ACTIONS) do
         footer[#footer + 1] = { key = a.key, label = a.name, run = a.fn, no_hotkey = true }

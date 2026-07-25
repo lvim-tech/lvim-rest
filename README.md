@@ -39,8 +39,9 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
   Reorderable (`ord` is persisted), and each request opens as an ordinary `.http` buffer bound to its
   row: `:w` re-parses it and updates the record, so the request *builder* is just the editor.
 - **The workbench** — `:LvimRest workbench` opens a tab of its own with the library tree beside the
-  request editor (the response dock keeps its configured layout). `:LvimRest library` docks the same
-  tree as a sidebar next to whatever you are already doing.
+  request editor and a persistent response dock; `:LvimRest dock` toggles between two layouts
+  (editor-over-response on the right with a full-height tree, or a full-width result under the top row).
+  `:LvimRest library` docks the same tree as a sidebar next to whatever you are already doing.
 - **Lua scripting + tests** — `< {% … %}` before a request and `> {% … %}` after the response (or a
   `< ./setup.lua` / `> ./check.lua` file). They are **Lua**, not JavaScript: the host language is
   already Lua, so there is no JS engine to ship. A pre-script may rewrite `request.method` / `url` /
@@ -120,8 +121,9 @@ the dock. `:LvimRest` with no argument prints status; the subcommands are:
 
 | Command | Action |
 | --- | --- |
-| `:LvimRest workbench` | toggle the full-tab workbench (library + editor) |
+| `:LvimRest workbench` | toggle the full-tab workbench (library + editor + response) |
 | `:LvimRest library` | dock the library tree as a sidebar |
+| `:LvimRest dock` | toggle the workbench layout — editor/response stacked ⟷ full-width result |
 | `:LvimRest run [datafile]` | run the collection, once per data-file row |
 | `:LvimRest send` | send the request under the cursor |
 | `:LvimRest all` | send every request in the buffer |
@@ -165,16 +167,24 @@ the token from its response.
 
 ## The library, the workbench and the runner
 
-Requests do not have to live in a file. `:LvimRest workbench` opens the library in a tab of its own:
+Requests do not have to live in a file. `:LvimRest workbench` opens the library in a tab of its own,
+with a persistent response dock. `:LvimRest dock` toggles between two layout states:
 
 ```
-┌───────────────┬──────────────────────────────────────────┐
-│  explorer     │  request editor (the bound `.http` buf)  │
-│  (library)    │                                          │
-└───────────────┴──────────────────────────────────────────┘
+  state 1 (default)                     state 2 (:LvimRest dock)
+┌────────┬─────────────────┐          ┌────────┬─────────────────┐
+│        │ request editor  │          │        │ request editor  │
+│ library├─────────────────┤          │ library│                 │
+│ (tree, │ response dock   │          │ (tree) │                 │
+│  full  │                 │          ├────────┴─────────────────┤
+│  height│                 │          │ response (full width)    │
+└────────┴─────────────────┘          └──────────────────────────┘
+  tree full-height; editor 1/3          tree+editor on top 2/3;
+  over response 2/3 on the right        result full-width bottom 1/3
 ```
 
-In the tree: `<CR>` opens a request in the editor, `S` sends it, `X` runs the whole collection the
+The tab lifecycle, the editor pane and the chrome are the shared `lvim-ui.workspace` shell (the same
+primitive the other full-screen lvim-tech clients use). In the tree: `<CR>` opens a request in the editor, `S` sends it, `X` runs the whole collection the
 cursor is inside (on a folder, just that subtree), `a` / `A` / `n` add a request / folder /
 collection, `r` renames, `d` deletes, `]e` / `[e` move an item among its siblings, `w` switches
 workspace, `R` refreshes — and `?` opens a window listing all of them. The panel's footer carries
@@ -395,7 +405,12 @@ require("lvim-rest").setup({
     },
     workbench = { -- the dedicated full-tab IDE face
         explorer_width = 34,
-        dock = { position = "right", size = 0.42 }, -- "right" | "bottom"
+        -- the response dock inside the workbench tab; `:LvimRest dock` toggles the two layout states
+        dock = {
+            position = "bottom", -- state-1 side: "bottom" (below the editor) | "right" (beside it)
+            span = "stacked", -- "stacked" = tree full-height, editor/response stacked right | "full" = full-width result below tree+editor
+            size = { stacked = 0.66, full = 0.34 }, -- per-state height fraction (right column vs whole tab)
+        },
     },
     dock = { -- the inline dock when sending from a loose .http file
         layout = "bottom", -- "float" | "area" | "bottom"

@@ -118,6 +118,37 @@ local function chain_deps(req)
     return deps
 end
 
+--- Whether the request (or a variable it interpolates) carries a `{{ vault … }}` reference — the cue
+--- that resolution will need the wallet UNLOCKED. Same scan surface as `chain_deps` (url / headers /
+--- body / vars), plus the document vars a `{{name}}` may pull the reference in through.
+---@param req LvimRestRequest
+---@param doc LvimRestDocument
+---@return boolean
+local function references_vault(req, doc)
+    if not config.vault.enabled then
+        return false
+    end
+    local function has(s)
+        return type(s) == "string" and s:match("{{%s*vault") ~= nil
+    end
+    if has(req.url) or has(req.body) then
+        return true
+    end
+    for _, h in ipairs(req.headers or {}) do
+        if has(h.value) then
+            return true
+        end
+    end
+    for _, list in ipairs({ req.vars or {}, (doc and doc.vars) or {} }) do
+        for _, v in ipairs(list) do
+            if has(v.value) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- Forward declaration for recursion (run_deps calls execute).
 local execute
 
@@ -170,8 +201,25 @@ end
 ---@param doc LvimRestDocument
 ---@param req LvimRestRequest
 ---@param prompts table<string, string>
----@param opts { show?: boolean, on_done?: fun(result: table), silent?: boolean, vars?: table<string, string> }
+---@param opts { show?: boolean, on_done?: fun(result: table), silent?: boolean, vars?: table<string, string>, _vault_gated?: boolean }
 execute = function(bufnr, doc, req, prompts, opts)
+    -- A locked wallet resolves every `{{ vault … }}` to nil (`get_sync` never prompts), so the secret
+    -- would silently go out as the literal template. Mirror lvim-db: when the request references the
+    -- vault, ensure the wallet is unlocked FIRST (the keyring pops its own master-password prompt),
+    -- then re-enter. `_vault_gated` makes this a one-shot so the retry can never loop, and we proceed
+    -- whether or not it unlocked — an unresolved template still runs (and fails visibly) rather than
+    -- stranding the send, keeping the promise that `on_done` fires.
+    if not opts._vault_gated and references_vault(req, doc) then
+        opts._vault_gated = true
+        local ok_kr, kr = pcall(require, "lvim-keyring")
+        if ok_kr and type(kr.ensure_unlocked) == "function" then
+            kr.ensure_unlocked(function()
+                execute(bufnr, doc, req, prompts, opts)
+            end)
+            return
+        end
+    end
+
     local bufname = vim.api.nvim_buf_get_name(bufnr)
     local base_dir = vim.fn.fnamemodify(bufname, ":h")
 
