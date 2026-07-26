@@ -37,8 +37,8 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
 - **The request library (sqlite)** — workspaces ▸ collections ▸ nested folders ▸ requests, with
   examples, environments and run history, stored in the same sqlite database as the history.
   Reorderable (`ord` is persisted), and each request opens as an ordinary `.http` buffer bound to its
-  row: the save key (`<localleader>w`) re-parses it and updates the record, so the request *builder* is
-  just the editor. (The buffer is a nameless scratch, not a file — there is nothing on disk to `:w`.)
+  row: the editor panel's save key (`<localleader>s`) re-parses it and updates the record, so the request
+  *builder* is just the editor. (The buffer is a nameless scratch, not a file — there is nothing on disk to `:w`.)
 - **The workbench** — `:LvimRest` opens a tab of its own with the library tree beside the request
   editor and a persistent response dock, and focuses the tree — one coherent full-tab client, like
   `:LvimDb`. `:LvimRest dock` toggles between two layouts (editor-over-response on the right with a
@@ -75,7 +75,7 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
   folders, headers, bodies, auth, examples and scripts). A HAR's recorded responses come in as
   examples — a recording's whole value is that it says what came back. Copy any request out as curl
   from the dock.
-- **Save into a collection** — `:LvimRest save` (or `<leader>rs`) puts the request under the cursor
+- **Save into a collection** — `:LvimRest save` (or `<localleader>v`) puts the request under the cursor
   into the library, carrying the document's variables so the stored request runs on its own.
 - **Secrets are always vaulted** — secret-shaped fields go to lvim-keyring, never plaintext; masked
   in `:LvimRest inspect`, notifications, verbose view and copy-as-curl.
@@ -185,11 +185,14 @@ layout states:
 ```
 
 The tab lifecycle, the editor pane and the chrome are the shared `lvim-ui.workspace` shell (the same
-primitive the other full-screen lvim-tech clients use). In the tree: `<CR>` opens a request in the editor, `S` sends it, `X` runs the whole collection the
-cursor is inside (on a folder, just that subtree), `a` / `A` / `n` add a request / folder /
-collection, `r` renames, `d` deletes, `]e` / `[e` move an item among its siblings, `w` switches
-workspace, `R` refreshes — and `?` opens a window listing all of them. The panel's footer carries
-the everyday actions as clickable chips.
+primitive the other full-screen lvim-tech clients use). In the tree: `<CR>` opens a request in the
+editor, `r` sends the request under the cursor, `a` runs everything under the cursor (a whole
+collection, or a folder's subtree), `S` opens the **collection settings** (its headers / variables /
+gRPC defaults — see below), `o` / `A` / `n` add a request / folder / collection, `e` renames, `d` deletes, `J` / `K`
+(or `]e` / `[e`) move an item up / down among its siblings, `w` switches workspace, `R` refreshes —
+and `g?` opens a window listing all of them. The footer chip follows the cursor: `r Run` on a
+request, `a All` on a folder or collection. The panel's footer carries the everyday actions as
+clickable chips.
 
 `:LvimRest` is idempotent — called again it just refocuses the tree (never a second copy). Close
 the client with `q` in any of its panels. Fold state survives closing and reopening it.
@@ -234,8 +237,8 @@ in a loose `.http` file and in a request opened from the library alike.
 row is built from a fresh parse of the buffer and every change is written back as buffer TEXT, one
 line at a time. So a line the form did not touch is byte-identical afterwards — your comments, your
 blank lines and any `# @directive` this plugin does not understand are never rewritten or reordered.
-A request opened from the library is edited the same way, through its bound buffer, and the save key
-(`<localleader>w`) persists it exactly as a hand edit does; the form never writes to the database itself.
+A request opened from the library is edited the same way, through its bound buffer, and the editor panel's
+save key (`<localleader>s`) persists it exactly as a hand edit does; the form never writes to the database itself.
 
 Two consequences worth knowing:
 
@@ -311,6 +314,18 @@ Headers are gRPC metadata; the body is the request message as JSON and the reply
 Unary calls only — a streaming method has no single response, which is what the WebSocket session
 model is for. Both are **daemon-only**: curl can neither speak gRPC nor hold a duplex connection.
 
+`# @grpc-authority` sets the TLS SNI / HTTP2 `:authority` — needed when the endpoint host differs
+from the cert/vhost the server routes by (e.g. an nginx gRPC front); `# @grpc-insecure` sends
+plaintext (no TLS).
+
+**Collection-level gRPC defaults.** When every request in a collection hits the same server, the
+proto files, import dirs, authority and insecure flag are the same on each — so set them ONCE on the
+collection instead of repeating them per request. In the library tree press `S` on the collection to
+open its settings and fill the **gRPC** tab; every `GRPC` request in the collection then inherits
+those defaults (they are rendered into the request document, exactly like a collection-level `# @auth`
+scheme). A request that carries its own `@grpc-*` overrides the collection's — the same inheritance
+model auth uses.
+
 ## Scripting
 
 ```http
@@ -360,8 +375,21 @@ never translated: an imported script is preserved verbatim in the request's docs
 and not executed. Exported Lua scripts go out as events typed `text/lua`, so a round-trip through
 lvim-rest keeps them.
 
-A collection-level auth scheme is inherited by requests that declare none — it is rendered into the
-request's document form, so you can see what will be sent and override it by editing the line.
+**Collection-level defaults are inherited by requests that declare none.** Press `S` on a collection in
+the library tree to open its settings — a tabbed form with **Headers**, **Variables** and (when the
+collection has a gRPC request) **gRPC** defaults:
+
+- a **header** set on the collection reaches every request that does not set the same header (a shared
+  `Accept`, or a base `Authorization`);
+- a **variable** set on the collection resolves in every request (`{{base}}`, `{{token}}`), unless a
+  request defines its own of that name;
+- the **gRPC** config (proto / import / authority / insecure) reaches every `GRPC` request that carries
+  no `@grpc-*` of its own;
+- a collection-level `# @auth` scheme (e.g. from a Postman import) is inherited the same way.
+
+Every default is rendered into the request's document form, so you can see what will be sent and override
+it by editing the line (saving then makes the inherited value the request's own — the document is the
+truth). A request always wins over its collection.
 
 OpenAPI: the server url becomes a `{{baseUrl}}` collection variable, path parameters become
 request-local variables (`/pets/{{petId}}`), required query parameters are appended empty, and a
@@ -406,6 +434,13 @@ require("lvim-rest").setup({
     },
     workbench = { -- the dedicated full-tab IDE face
         explorer_width = 34,
+        -- the editor panel's OWN action keys (localleader — scoped to the panel; the chip bar shows these)
+        keys = {
+            run = "<localleader>r", -- Run: send the request under the cursor
+            run_all = "<localleader>a", -- Run All: send every request in the buffer
+            save = "<localleader>s", -- Save: write the request back to its library row
+            options = "<localleader>o", -- Option: open the request options form
+        },
         -- the response dock inside the workbench tab; `:LvimRest dock` toggles the two layout states
         dock = {
             position = "bottom", -- state-1 side: "bottom" (below the editor) | "right" (beside it)
@@ -470,18 +505,17 @@ require("lvim-rest").setup({
     prompt = { cache = true },
     inline_status = true,
     keys = { -- buffer-local maps on http/rest buffers (all configurable)
-        send = "<CR>",
-        save = "<localleader>w", -- save a library-bound request back to its row (no `:w` on the scratch)
-        send_all = "<leader>ra",
-        replay = "<leader>rr",
-        cancel = "<leader>rx",
-        inspect = "<leader>ri",
+        send = "<localleader>r", -- Run
+        send_all = "<localleader>a", -- Run All
+        replay = "<localleader>p",
+        cancel = "<localleader>x",
+        inspect = "<localleader>i",
         jump_next = "]r",
         jump_prev = "[r",
-        explorer = "<leader>rc",
-        run_collection = "<leader>rR",
-        save_into = "<leader>rs",
-        options = "<leader>ro",
+        explorer = "<localleader>c",
+        run_collection = "<localleader>R",
+        save_into = "<localleader>v",
+        options = "<localleader>o",
     },
     icons = { -- real Nerd Font single-width glyphs; ➤ for pointers
         get = "󰇚",

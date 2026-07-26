@@ -68,12 +68,48 @@ local function set_mark(bufnr, line, chunks, existing)
     return ok and id or nil
 end
 
+--- Clear EVERY lane extmark physically sitting on `line`'s row — not just the one keyed by this line number.
+--- A lane is keyed by line in `marks`, but its extmark MOVES with the text when the buffer is edited (nvim
+--- shifts it). So after an edit between sends, the old lane's key no longer matches its extmark's current row;
+--- keying alone would leave a stale chip that then stacks under the new one. This clears by ROW, dropping any
+--- drifted lane's stale `marks` entry (and its timer) too.
+---@param bufnr integer
+---@param line integer
+local function clear_row(bufnr, line)
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+    end
+    local row = line - 1
+    if row < 0 then
+        return
+    end
+    local ex = vim.api.nvim_buf_get_extmarks(bufnr, NS, { row, 0 }, { row, -1 }, {})
+    if #ex == 0 then
+        return
+    end
+    local dead = {}
+    for _, m in ipairs(ex) do
+        dead[m[1]] = true
+        pcall(vim.api.nvim_buf_del_extmark, bufnr, NS, m[1])
+    end
+    for k, e in pairs(marks) do
+        if e.id and dead[e.id] then
+            if e.timer and not e.timer:is_closing() then
+                e.timer:stop()
+                e.timer:close()
+            end
+            marks[k] = nil
+        end
+    end
+end
+
 --- Start the running spinner on a request line.
 ---@param bufnr integer
 ---@param line integer
 ---@param method string
 function M.start(bufnr, line, method)
     M.clear(bufnr, line)
+    clear_row(bufnr, line) -- also drop any lane whose extmark DRIFTED onto this row after an edit between sends
     local frames = config.icons.spinner
     local hl = method_hl(method)
     local id = set_mark(bufnr, line, { { "  " .. frames[1] .. " sending", hl } })

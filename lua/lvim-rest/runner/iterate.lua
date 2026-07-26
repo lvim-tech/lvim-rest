@@ -150,7 +150,7 @@ function M.cancel()
 end
 
 --- Run a collection (or folder), optionally once per data row.
----@param opts { collection_id: integer, folder_id?: integer, data?: table[], data_file?: string, env_id?: integer, stop_on_failure?: boolean, delay?: integer, on_progress?: fun(info: table), on_done?: fun(summary: table) }
+---@param opts { collection_id: integer, folder_id?: integer, data?: table[], data_file?: string, env_id?: integer, stop_on_failure?: boolean, delay?: integer, on_progress?: fun(info: table), on_result?: fun(info: table, result: table?), on_done?: fun(summary: table) }
 ---@return boolean started
 function M.run(opts)
     opts = opts or {}
@@ -293,6 +293,11 @@ function M.run(opts)
                         error = (not ok) and (result and (result.error or assert_msg)) or nil,
                     })
                 end
+                -- Per-request RESULT hook (the batch run sheet uses it to paint each block's inline status
+                -- and to feed the response into the dock's log). Runs for EVERY request, pass or fail.
+                if opts.on_result then
+                    opts.on_result({ iteration = iter, index = idx, request = req, ok = ok }, result)
+                end
                 if not ok and stop_on_failure then
                     active.cancelled = true
                 end
@@ -316,6 +321,38 @@ function M.run(opts)
     end
 
     notify(("running %d request(s) × %d iteration(s)"):format(#requests, iterations))
+    -- Unlock the wallet ONCE up front when any request in the run references a `{{ vault … }}` secret. A run
+    -- resolves each request with `get_sync` (never prompts), and the per-request send gate only fires for the
+    -- request that OWNS the reference — so a request that relies on it via a chain (e.g. `authorization:
+    -- {{signin.…}}`) would fire before the user typed the password and fail on missing auth. Unlocking here,
+    -- before the first step, means the whole run has the secret. Best-effort: no keyring ⇒ just start.
+    local function needs_vault()
+        if not (config.vault or {}).enabled then
+            return false
+        end
+        for _, r in ipairs(requests) do
+            for _, s in ipairs({ r.url, r.body }) do
+                if type(s) == "string" and s:match("{{%s*vault") then
+                    return true
+                end
+            end
+            for _, h in ipairs(r.headers or {}) do
+                if type(h) == "table" and type(h.value) == "string" and h.value:match("{{%s*vault") then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    if needs_vault() then
+        local ok_kr, kr = pcall(require, "lvim-keyring")
+        if ok_kr and type(kr.ensure_unlocked) == "function" then
+            kr.ensure_unlocked(function()
+                step(1, 1)
+            end)
+            return true
+        end
+    end
     step(1, 1)
     return true
 end

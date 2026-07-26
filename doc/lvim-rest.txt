@@ -355,7 +355,7 @@ sqlite database as the history:
   workspace  >  collection  >  folder (nestable)  >  request
 
 Each request opens as an ordinary `.http` buffer BOUND to its row — a nameless
-scratch, not a file. The save key (`<localleader>w`) re-parses the buffer and
+scratch, not a file. The editor panel's save key (`<localleader>s`) re-parses the buffer and
 updates the record. So the request builder is just the editor — treesitter
 highlighting, the send maps and variable completion all work exactly as they
 do for a real `.http` file.
@@ -477,7 +477,7 @@ SAVE INTO A COLLECTION ~
 for the collection, the folder and a name. The document's own `@var` lines are
 carried along as request-local variables, so the stored request runs on its
 own without the document around it. A request that is ALREADY bound to a
-library row is not duplicated — the save key (`<localleader>w`) updates it.
+library row is not duplicated — the editor panel's save key (`<localleader>s`) updates it.
 
 ==============================================================================
 14. COMMANDS                                             *lvim-rest-commands*
@@ -538,7 +538,7 @@ is written back as buffer TEXT, one line at a time. A line the form did not
 touch is byte-identical afterwards — comments, blank lines and any
 `# @directive` this plugin does not understand are never rewritten or
 reordered. A request opened from the library is edited through its bound
-buffer, and the save key (`<localleader>w`) persists it exactly as a hand edit
+buffer, and the editor panel's save key (`<localleader>s`) persists it exactly as a hand edit
 does; the form never writes to the database itself.
 
 Switching a HEADER off comments its line out (`# X-Trace: 1`) — the text
@@ -551,17 +551,24 @@ pretend: edit, add and delete are the operations it offers.
 
 Buffer-local on `http` / `rest` buffers (all configurable via `keys`):
 
-  <CR>          send the request under the cursor
-  <localleader>w  save a library-bound request back to its row
-  <leader>ra    send all
-  <leader>rr    replay last
-  <leader>rx    cancel
-  <leader>ri    inspect resolved request
-  <leader>ro    the request options form
-  ]r / [r       next / previous request
-  <leader>rs    save the request into a collection
-  <leader>rc    the library tree
-  <leader>rR    run a collection
+  <localleader>r  send (Run) the request under the cursor
+  <localleader>a  send all (Run All)
+  <localleader>p  replay last
+  <localleader>x  cancel
+  <localleader>i  inspect resolved request
+  <localleader>o  the request options form
+  ]r / [r         next / previous request
+  <localleader>v  save the request into a collection
+  <localleader>c  the library tree
+  <localleader>R  run a collection
+
+The WORKBENCH EDITOR PANEL adds its own buffer-local action keys (localleader,
+configurable via `workbench.keys`), shown on the editor's footer chip bar:
+
+  <localleader>r  Run — send the request under the cursor
+  <localleader>a  Run All — send every request in the buffer
+  <localleader>s  Save — write the request back to its library row
+  <localleader>o  Option — open the request options form
 
 ==============================================================================
 16. CONFIGURATION                                          *lvim-rest-config*

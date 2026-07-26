@@ -83,11 +83,14 @@ function M.secret_var(name)
         or n:match("client_secret") ~= nil
 end
 
---- Whether a value is already a vault reference (must not be re-vaulted).
+--- Whether a value contains ANY `{{ … }}` template reference — a vault secret, a chain ref
+--- (`{{signin.response.body.$.token}}`), an env / dotenv / dynamic var, a prompt. None of these are a
+--- PLAINTEXT secret: they resolve at send time and nothing sensitive is ever stored, so `detect_secrets`
+--- must NOT flag them (only a literal value like `Bearer eyJ…` is a real plaintext secret to vault).
 ---@param value string
 ---@return boolean
-local function is_vault_ref(value)
-    return value:match("{{%s*vault") ~= nil
+local function is_template_ref(value)
+    return value:match("{{.-}}") ~= nil
 end
 
 --- Detect secret-shaped fields in a parsed request (for save-into-library vaulting).
@@ -97,12 +100,12 @@ end
 function M.detect_secrets(req)
     local hits = {}
     for _, h in ipairs(req.headers or {}) do
-        if secret_header(h.name) and not is_vault_ref(h.value) and h.value ~= "" then
+        if secret_header(h.name) and not is_template_ref(h.value) and h.value ~= "" then
             hits[#hits + 1] = { field = "header", name = h.name, value = h.value }
         end
     end
     for _, v in ipairs(req.vars or {}) do
-        if M.secret_var(v.name) and not is_vault_ref(v.value) and v.value ~= "" then
+        if M.secret_var(v.name) and not is_template_ref(v.value) and v.value ~= "" then
             hits[#hits + 1] = { field = "var", name = v.name, value = v.value }
         end
     end

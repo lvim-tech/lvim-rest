@@ -265,13 +265,15 @@ function M.collection(id)
     end
     row.auth = dec(row.auth_json)
     row.vars = dec(row.vars_json)
+    row.headers = dec(row.headers_json)
+    row.grpc = dec(row.grpc_json)
     return row
 end
 
 --- Create a collection at the end of the workspace's list.
 ---@param workspace_id integer
 ---@param name string
----@param opts { description?: string, auth?: table, vars?: table, pre_script?: string, post_script?: string }?
+---@param opts { description?: string, auth?: table, vars?: table, headers?: table, grpc?: table, pre_script?: string, post_script?: string }?
 ---@return integer? id
 function M.add_collection(workspace_id, name, opts)
     local d = db()
@@ -286,15 +288,17 @@ function M.add_collection(workspace_id, name, opts)
         description = opts.description,
         auth_json = enc(opts.auth),
         vars_json = enc(opts.vars),
+        headers_json = enc(opts.headers),
+        grpc_json = enc(opts.grpc),
         pre_script = opts.pre_script,
         post_script = opts.post_script,
     })
     return type(id) == "number" and id or nil
 end
 
---- Patch a collection. Table fields (`auth`, `vars`) are encoded here.
+--- Patch a collection. Table fields (`auth`, `vars`, `headers`, `grpc`) are encoded here.
 ---@param id integer
----@param fields { name?: string, description?: string, auth?: table, vars?: table, pre_script?: string, post_script?: string }
+---@param fields { name?: string, description?: string, auth?: table, vars?: table, headers?: table, grpc?: table, pre_script?: string, post_script?: string }
 ---@return boolean
 function M.update_collection(id, fields)
     local d = db()
@@ -312,6 +316,14 @@ function M.update_collection(id, fields)
     end
     if fields.vars ~= nil then
         set.vars_json = enc(fields.vars)
+    end
+    if fields.headers ~= nil then
+        set.headers_json = enc(fields.headers)
+    end
+    if fields.grpc ~= nil then
+        -- An empty table stores "{}", which `dec` reads back as an empty table — render treats that as
+        -- "no defaults" (it guards on a non-empty grpc), so an empty grpc cleanly clears inheritance.
+        set.grpc_json = enc(fields.grpc)
     end
     if vim.tbl_isempty(set) then
         return true

@@ -19,8 +19,9 @@ local fs = require("lvim-rest.fs")
 
 local M = {}
 
--- The view modes, in header-bar order.
-local VIEWS = { "body", "headers", "both", "stats", "verbose", "script", "report" }
+-- The view modes, in header-bar order. `log` is the session RESPONSE LOG (like lvim-db's call log): every
+-- response appends a row; opening one shows its CACHED body (no re-send), and it lists a whole send-all sweep.
+local VIEWS = { "body", "headers", "both", "stats", "verbose", "script", "report", "log" }
 
 local state = {
     surface = nil, ---@type table?
@@ -35,6 +36,9 @@ local state = {
     host = "inline", ---@type "inline"|"workbench"  where the dock lives (drives its surface layout)
     anchor = nil, ---@type integer?  the workbench editor window the dock splits (workbench host only)
     workspace_id = nil, ---@type string?  the lvim-ui.workspace id (workbench host only; drives dock_split/toggle_layout)
+    ---@type table[]  the session RESPONSE LOG (newest last): { result, meta, source }
+    log = {},
+    log_rows = {}, ---@type table[]  line → log entry, for the log view's open/re-run
 }
 
 --- Whether the dock is currently open.
@@ -78,9 +82,58 @@ local function paint(lines, hls, ft)
     end
 end
 
+--- The status-accent highlight group for a status code (2xx green · 3xx yellow · 4xx orange · 5xx red).
+---@param status integer
+---@return string
+local function status_group(status)
+    if status >= 200 and status < 300 then
+        return "LvimRestStatus2xx"
+    elseif status >= 300 and status < 400 then
+        return "LvimRestStatus3xx"
+    elseif status >= 400 and status < 500 then
+        return "LvimRestStatus4xx"
+    end
+    return "LvimRestStatus5xx"
+end
+
+--- Render the session RESPONSE LOG: one row per response (newest first), status-accented, with the method,
+--- the request name/url and the timing — the lvim-db call-log canon. Fills `state.log_rows` (line → entry).
+local function render_log()
+    state.log_rows = {}
+    if #state.log == 0 then
+        paint(
+            { "", "  no responses yet" },
+            { { row = 1, col_start = 2, col_end = 18, group = "LvimRestEmpty" } },
+            "text"
+        )
+        return
+    end
+    local lines, hls = {}, {}
+    for i = #state.log, 1, -1 do
+        local e = state.log[i]
+        local r = e.result or {}
+        local status = r.status or 0
+        local ms = (r.timing and r.timing.total) or 0
+        local method = r.method or (r.request and r.request.method) or ""
+        local label = (e.meta and e.meta.title) or (r.url or "?")
+        local line = ("  %-3s %4dms  %-7s %s"):format(tostring(status), ms, method, label)
+        lines[#lines + 1] = line
+        local sc0 = 2
+        hls[#hls + 1] =
+            { row = #lines - 1, col_start = sc0, col_end = sc0 + #tostring(status), group = status_group(status) }
+        state.log_rows[#lines] = e -- 1-based line → entry
+    end
+    paint(lines, hls, "text")
+end
+
 --- Re-render the current view into the dock.
 local function render()
     if not is_open() then
+        return
+    end
+    -- The LOG view lists ALL responses (not the current one), so it renders even before/without a result.
+    if state.view == "log" then
+        render_log()
         return
     end
     if not state.result then
@@ -133,13 +186,17 @@ end
 --- response's status + time ride the RIGHT of the same band (see `range_text`).
 ---@return string
 local function title_left()
-    return "RESULT"
+    return state.view == "log" and "LOG" or "RESULT"
 end
 
---- The RIGHT side of the title band: the response status + total time (the response's "counter"), or ""
---- before the first response — so the band reads `POST … ……… 200 OK · 342 ms`.
+--- The RIGHT side of the title band: in the LOG view the response count, else the current response's status +
+--- total time (the response's "counter"), or "" before the first response — so it reads `200 OK · 342 ms`.
 ---@return string
 local function range_text()
+    if state.view == "log" then
+        local n = #state.log
+        return n > 0 and tostring(n) or ""
+    end
     local m = state.result
     if not m then
         return ""
@@ -151,8 +208,11 @@ end
 
 -- ── header (view modes + jq) ────────────────────────────────────────────────
 
--- Forward declaration: header_spec closes over set_view, set_view over header_spec.
+-- Forward declaration: header_spec closes over set_view, set_view over header_spec / footer_spec.
 local set_view
+---@type fun(): table  the FOOTER spec — differs by view (response actions vs the log's open/re-run), so
+--- `set_view` re-derives it; defined below with the footer actions.
+local footer_spec
 
 --- The view-tab button BOX-COLOUR override (passed as the record's `hl`, NOT `style` — `style` names an
 --- M.STYLES kind, `hl` is the per-state colour override merged over it). The lvim-installer TOOLBAR canon: a
@@ -201,6 +261,7 @@ local function header_spec()
     -- `fill` — the full-width `LvimUiBarFill` strip, which IS the subtle YELLOW button-bar tint — so the row
     -- reads as one yellow-tinted bar with the fg-only yellow buttons painted over it (the shared bar canon).
     local tabbar = surface.bar({ group }, registry, { align = "center" })
+    tabbar.snap_active = true -- on a rebuild the selection follows the active view (no stale `[ ]` hover)
     return {
         bars = {
             -- The TITLE BAND: "RESULT" on the LEFT, `status · time` pushed to the RIGHT — a full-width
@@ -223,8 +284,14 @@ end
 set_view = function(view)
     state.view = view
     render()
-    if state.surface and state.surface.set_header then
-        pcall(state.surface.set_header, header_spec())
+    if state.surface then
+        if state.surface.set_header then
+            pcall(state.surface.set_header, header_spec())
+        end
+        -- The footer differs by view (response actions vs the log's open / re-run), so re-derive it too.
+        if state.surface.set_footer then
+            pcall(state.surface.set_footer, footer_spec())
+        end
     end
 end
 
@@ -274,9 +341,75 @@ local function copy_curl()
     vim.notify("lvim-rest: copied as curl", vim.log.levels.INFO)
 end
 
---- Build the footer bar spec.
+--- The log row under the cursor in the dock window, or nil.
+---@return table?
+local function focused_log_entry()
+    if not (state.win and api.nvim_win_is_valid(state.win)) then
+        return nil
+    end
+    return state.log_rows[api.nvim_win_get_cursor(state.win)[1]]
+end
+
+--- Open a log entry's CACHED response — no re-send: swap the current result to it and show the body view.
+---@param e table?  a log entry
+local function open_log(e)
+    if not (e and e.result) then
+        return
+    end
+    state.result, state.meta, state.jq = e.result, e.meta or {}, nil
+    set_view(config.default_view) -- render the body + rebuild header/footer
+end
+
+--- Re-run the request behind a log entry (re-send) — appends a NEW log row. Needs a live source buffer.
+---@param e table?  a log entry
+local function rerun_log(e)
+    local src = e and e.source
+    if src and src.bufnr and api.nvim_buf_is_valid(src.bufnr) then
+        require("lvim-rest.runner").send(src.bufnr, src.lnum or 1)
+    else
+        vim.notify("lvim-rest: cannot re-run — the source request is no longer open", vim.log.levels.WARN)
+    end
+end
+
+--- The close action, shared by both footers: inside the workbench `q` tears the WHOLE tab down (the response
+--- is one of three panes), the inline dock just closes.
+---@param s table  the surface state
+local function do_close(s)
+    if state.host == "workbench" then
+        require("lvim-rest.ui.workbench").close()
+    else
+        s.close()
+    end
+end
+
+--- Build the footer bar spec — DIFFERENT buttons per view: the log view offers open / re-run (like lvim-db's
+--- call log; re-run only meaningful with the cache on), every response view the yank / save / curl / replay
+--- actions. `<CR>` / `R` are bound buffer-locally (see the provider) so a click and its key run the same code.
 ---@return table
-local function footer_spec()
+footer_spec = function()
+    local close = { name = "close", key = "q", run = do_close }
+    if state.view == "log" then
+        local registry = {
+            open = {
+                name = "open",
+                key = "⏎",
+                run = function()
+                    open_log(focused_log_entry())
+                end,
+            },
+            rerun = {
+                name = "re-run",
+                key = "R",
+                run = function()
+                    rerun_log(focused_log_entry())
+                end,
+            },
+            close = close,
+        }
+        local groups = (config.dock.cache or {}).enabled ~= false and { { "open", "rerun" }, { "close" } }
+            or { { "rerun" }, { "close" } }
+        return { bars = { surface.bar(groups, registry) } }
+    end
     local registry = {
         yank = { name = "yank", key = "y", run = yank_body },
         save = { name = "save", key = "s", run = save_body },
@@ -288,19 +421,7 @@ local function footer_spec()
                 require("lvim-rest.runner").replay()
             end,
         },
-        close = {
-            name = "close",
-            key = "q",
-            run = function(s)
-                -- Inside the workbench the response is one of three panes, so `q` tears the WHOLE tab down
-                -- (closing just this pane would strand the tree + editor); the inline dock just closes.
-                if state.host == "workbench" then
-                    require("lvim-rest.ui.workbench").close()
-                else
-                    s.close()
-                end
-            end,
-        },
+        close = close,
     }
     return { bars = { surface.bar({ { "yank", "save", "curl" }, { "replay", "close" } }, registry) } }
 end
@@ -336,6 +457,28 @@ local function surface_cfg()
         update = function(pan)
             state.buf, state.win = pan.buf, pan.win
             vim.bo[pan.buf].buftype = "nofile"
+            -- Log-view keys (no-ops in every other view): <CR> opens the focused response (cached, no re-send),
+            -- R re-runs it as a new log row — same handlers as the log footer's open / re-run chips.
+            vim.keymap.set("n", "<CR>", function()
+                if state.view == "log" then
+                    open_log(focused_log_entry())
+                end
+            end, {
+                buffer = pan.buf,
+                nowait = true,
+                silent = true,
+                desc = "lvim-rest: open the focused response",
+            })
+            vim.keymap.set("n", "R", function()
+                if state.view == "log" then
+                    rerun_log(focused_log_entry())
+                end
+            end, {
+                buffer = pan.buf,
+                nowait = true,
+                silent = true,
+                desc = "lvim-rest: re-run the focused response",
+            })
             render()
         end,
         on_close = function()
@@ -404,12 +547,43 @@ local function surface_cfg()
     return cfg
 end
 
+--- Append a response to the session RESPONSE LOG (kept in memory — a response is a small Lua table — capped
+--- at `config.dock.cache.size`, newest last). No-op when caching is off. Does NOT render.
+---@param result table
+---@param meta table?  { title?, name?, source? }
+local function append_log(result, meta)
+    if (config.dock.cache or {}).enabled == false then
+        return
+    end
+    meta = meta or {}
+    state.log[#state.log + 1] = { result = result, meta = meta, source = meta.source }
+    local cap = (config.dock.cache or {}).size or 50
+    while #state.log > cap do
+        table.remove(state.log, 1)
+    end
+end
+
+--- Append a response to the log WITHOUT switching the dock to it — the batch run sheet feeds a collection run's
+--- responses in SILENTLY (no per-request flash), so they pile up in the `log` tab. Re-renders only the log view.
+---@param result table
+---@param meta table?  { title?, name?, source? }
+function M.log_append(result, meta)
+    append_log(result, meta)
+    if is_open() and state.view == "log" then
+        render()
+        if state.surface and state.surface.set_header then
+            pcall(state.surface.set_header, header_spec())
+        end
+    end
+end
+
 --- Show a response result in the dock (opening it if needed, re-rendering if already open).
 ---@param result table
----@param meta table?  { title?, name? }
+---@param meta table?  { title?, name?, source? }  `source = { bufnr, lnum }` lets the log re-run this request
 function M.show(result, meta)
     state.result = result
     state.meta = meta or {}
+    append_log(result, state.meta) -- keep it in the session log (the `log` tab + send-all navigation)
     state.jq = nil
     state.oversized = nil
     -- Size cap: divert an oversized body to a scratch file so the dock never stalls on a giant buffer.

@@ -38,6 +38,31 @@ local function notify(msg, level)
     vim.notify("lvim-rest: " .. msg, level or vim.log.levels.INFO)
 end
 
+--- The `@grpc-*` directive lines for a gRPC config table (proto / import / authority / insecure), in the
+--- order the parser reads them back. Shared by `render` (collection-level inheritance) and `docs_text`
+--- (the request's own, serialised into the `docs` column) so the two can never disagree on the wire form.
+---@param g table?  { proto?: string[], import?: string[], authority?: string, insecure?: boolean }
+---@return string[]
+local function grpc_lines(g)
+    local lines = {}
+    if type(g) ~= "table" then
+        return lines
+    end
+    for _, p in ipairs(g.proto or {}) do
+        lines[#lines + 1] = "@grpc-proto " .. p
+    end
+    for _, i in ipairs(g.import or {}) do
+        lines[#lines + 1] = "@grpc-import " .. i
+    end
+    if g.authority and g.authority ~= "" then
+        lines[#lines + 1] = "@grpc-authority " .. g.authority
+    end
+    if g.insecure then
+        lines[#lines + 1] = "@grpc-insecure"
+    end
+    return lines
+end
+
 -- ── render: row → `.http` text ───────────────────────────────────────────────
 
 --- Render a stored request as an `.http` document. The output is exactly what the parser accepts,
@@ -47,24 +72,34 @@ end
 function M.render(row)
     local out = {}
     out[#out + 1] = "### " .. (row.name or "request")
-    -- Request-local variables come before the request line, like a hand-written document.
+
+    -- The owning collection, fetched ONCE — every collection-level default (vars, auth, headers, gRPC)
+    -- reads from it, and each is INHERITED the same way: rendered into the document so you can see what
+    -- will be sent and override it by editing the line (saving then makes the inherited value the
+    -- request's own — the document is the truth). A request always wins over its collection.
+    local col = row.collection_id and library.collection(row.collection_id) or nil
+
+    -- Request-local variables come before the request line, like a hand-written document; then the
+    -- collection's variables the request does NOT itself define (a same-named request var overrides).
+    local own_var = {}
     for _, v in ipairs(row.vars or {}) do
         if type(v) == "table" and v.name then
+            own_var[v.name] = true
             out[#out + 1] = ("@%s = %s"):format(v.name, v.value or "")
         end
     end
-    -- Auth is a DIRECTIVE in the document form, so a stored request carries its scheme the same way
-    -- a hand-written one does — and editing the line is editing the row.
-    --
-    -- A request with no auth of its own INHERITS its collection's, which is Postman's rule and the
-    -- reason a collection-level scheme exists at all. It is rendered into the document rather than
-    -- applied invisibly at send time: you can see what will be sent, and overriding it is editing
-    -- the line you are already looking at. (Saving then makes the inherited value the request's own
-    -- — the document is the truth, and a value you can see is a value you meant.)
+    for _, v in ipairs((col and col.vars) or {}) do
+        if type(v) == "table" and v.name and not own_var[v.name] then
+            out[#out + 1] = ("@%s = %s"):format(v.name, v.value or "")
+        end
+    end
+
+    -- Auth is a DIRECTIVE in the document form, so a stored request carries its scheme the same way a
+    -- hand-written one does — and editing the line is editing the row. A request with no auth of its own
+    -- inherits its collection's (Postman's rule, and the reason a collection-level scheme exists at all).
     local auth = row.auth
-    if (type(auth) ~= "table" or not auth.scheme) and row.collection_id then
-        local col = library.collection(row.collection_id)
-        auth = col and col.auth or nil
+    if (type(auth) ~= "table" or not auth.scheme) and col then
+        auth = col.auth or nil
     end
     if type(auth) == "table" and auth.scheme then
         local parts = { "# @auth", auth.scheme }
@@ -82,14 +117,34 @@ function M.render(row)
         end
         out[#out + 1] = "%}"
     end
+    -- gRPC config INHERITANCE: a GRPC request that carries no `@grpc-*` of its own takes its collection's
+    -- defaults (proto / import / authority / insecure) — the same "collection-level scheme, rendered into
+    -- the document" rule as auth. Set the config once on the collection and every request inherits it; a
+    -- per-request directive still wins, because then `@grpc-` is already in `row.docs` and this is skipped.
+    -- (Saving makes the inherited lines the request's own — the document is the truth, as with auth.)
+    if row.method == "GRPC" and not (row.docs and row.docs:match("@grpc%-")) and col then
+        for _, l in ipairs(grpc_lines(col.grpc)) do
+            out[#out + 1] = "# " .. l
+        end
+    end
     if row.docs and row.docs ~= "" then
         for _, l in ipairs(vim.split(row.docs, "\n", { plain = true })) do
             out[#out + 1] = "# " .. l
         end
     end
     out[#out + 1] = ("%s %s"):format(row.method or "GET", row.url or "")
+    -- The request's own headers, then the collection's headers it does NOT itself set — a same-named
+    -- request header (case-insensitively) overrides the collection's, so a shared `Accept` / base
+    -- `Authorization` set once on the collection reaches every request that hasn't defined its own.
+    local own_header = {}
     for _, h in ipairs(row.headers or {}) do
         if type(h) == "table" and h.name then
+            own_header[h.name:lower()] = true
+            out[#out + 1] = ("%s: %s"):format(h.name, h.value or "")
+        end
+    end
+    for _, h in ipairs((col and col.headers) or {}) do
+        if type(h) == "table" and h.name and not own_header[h.name:lower()] then
             out[#out + 1] = ("%s: %s"):format(h.name, h.value or "")
         end
     end
@@ -116,6 +171,23 @@ function M.render(row)
 end
 
 -- ── write-back: buffer → row ─────────────────────────────────────────────────
+
+--- Rebuild the `docs` column — the `# …` lines rendered BEFORE the request line: the gRPC config
+--- (`@grpc-proto` / `@grpc-import` / `@grpc-authority` / `@grpc-insecure`) plus any plain doc comments. The
+--- parser reads `# @grpc-*` back as `req.directives.grpc`, so without serialising them here an edit to a
+--- gRPC directive (the endpoint's authority, its proto paths) would NOT persist — `fields_of` dropped both
+--- `docs` and the grpc directives, so `update_request` left the column at its old value.
+---@param req table
+---@return string
+local function docs_text(req)
+    local lines = grpc_lines(req.directives and req.directives.grpc)
+    if req.docs and req.docs ~= "" then
+        for _, l in ipairs(vim.split(req.docs, "\n", { plain = true })) do
+            lines[#lines + 1] = l
+        end
+    end
+    return table.concat(lines, "\n")
+end
 
 --- The library fields a parsed request maps onto.
 ---@param req table  LvimRestRequest
@@ -156,6 +228,9 @@ local function fields_of(req)
         headers = headers,
         body = req.body or "", -- same reason as the scripts above: a deleted body must clear the column
         vars = vars,
+        -- The gRPC directives + doc comments, so editing a `@grpc-*` line (endpoint authority, proto paths)
+        -- and saving actually persists — see `docs_text`. "" clears the column when the last one is removed.
+        docs = docs_text(req),
     }
 end
 

@@ -293,7 +293,10 @@ execute = function(bufnr, doc, req, prompts, opts)
                 if result.error and not opts.silent then
                     vim.notify("lvim-rest: " .. result.error, vim.log.levels.ERROR)
                 elseif opts.show ~= false then
-                    require("lvim-rest.ui.dock").show(result, { title = title, name = req.name })
+                    require("lvim-rest.ui.dock").show(
+                        result,
+                        { title = title, name = req.name, source = { bufnr = bufnr, lnum = req.line } }
+                    )
                 end
                 if opts.on_done then
                     opts.on_done(result)
@@ -384,7 +387,10 @@ execute = function(bufnr, doc, req, prompts, opts)
                     end
                 end
                 if opts.show ~= false then
-                    require("lvim-rest.ui.dock").show(result, { title = title, name = req.name })
+                    require("lvim-rest.ui.dock").show(
+                        result,
+                        { title = title, name = req.name, source = { bufnr = bufnr, lnum = req.line } }
+                    )
                 end
             end
             if opts.on_done then

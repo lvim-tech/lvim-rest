@@ -425,6 +425,7 @@ local function grpc_rows(req)
         mth_row.type = "string"
     end
 
+    local grpc_dir = req.directives.grpc or {}
     return {
         {
             type = "string",
@@ -435,6 +436,33 @@ local function grpc_rows(req)
         },
         svc_row,
         mth_row,
+        {
+            -- `@grpc-authority` — the TLS SNI / HTTP2 `:authority`. Matters when the endpoint's host differs
+            -- from the cert/vhost the server routes by (e.g. an nginx grpc front): it must name the gRPC vhost.
+            type = "string",
+            name = "grpc:authority",
+            label = "Authority (TLS SNI / :authority)",
+            value = grpc_dir.authority or "",
+            run = function(value)
+                if state.editor then
+                    state.editor:set_directive("grpc-authority", vim.trim(value))
+                    M.refresh()
+                end
+            end,
+        },
+        {
+            -- `@grpc-insecure` — plaintext (no TLS). On (a checked box) writes the directive; off removes it.
+            type = "bool",
+            name = "grpc:insecure",
+            label = "Insecure (plaintext, no TLS)",
+            value = grpc_dir.insecure == true,
+            run = function(value)
+                if state.editor then
+                    state.editor:set_directive("grpc-insecure", value == true or nil)
+                    M.refresh()
+                end
+            end,
+        },
         note(
             refl and "services + methods from the request's protos / reflection"
                 or "name a .proto with @grpc-proto (Settings) for service/method lists",

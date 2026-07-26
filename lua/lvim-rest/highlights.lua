@@ -54,6 +54,8 @@ function M.build()
 
         -- Header view: dim name, normal value.
         LvimRestHeaderName = { fg = mtint(c.fg, 0.6) },
+        -- The "no responses yet" placeholder in the log view (dim), matching lvim-db's LvimDbEmpty.
+        LvimRestEmpty = { fg = mtint(c.fg, 0.5) },
         LvimRestHeaderValue = { fg = c.fg },
 
         -- Stats view: dim key, bright value.

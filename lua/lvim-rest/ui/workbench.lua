@@ -85,16 +85,17 @@ local function editor_target()
     return api.nvim_win_get_buf(win), api.nvim_win_get_cursor(win)[1]
 end
 
---- The editor footer chips, from the LIVE `config.keys` (a key left empty drops its chip). Display + click
---- only — each `run` calls the same code the buffer-local key does.
----@return table[]
-local function footer_items()
-    local surface = require("lvim-ui.surface")
-    local k = config.keys
-    local defs = {
+--- The editor panel's four actions — Run / Run All / Save / Option — SHARED by the footer chips AND the
+--- buffer-local keys, so a chip click and its key run identical code. Each acts on the editor window's CURRENT
+--- buffer + cursor (via `editor_target`), so it follows whichever request is open. Keys come from
+--- `config.workbench.keys` (localleader, SCOPED to this panel — see `bind_editor_keys`).
+---@return { key: string|false, name: string, run: fun() }[]
+local function editor_actions()
+    local k = config.workbench.keys or {}
+    return {
         {
-            key = k.send,
-            name = "send",
+            key = k.run,
+            name = "Run",
             run = function()
                 local buf, line = editor_target()
                 if buf then
@@ -103,18 +104,8 @@ local function footer_items()
             end,
         },
         {
-            key = k.save,
-            name = "save",
-            run = function()
-                local buf = editor_target()
-                if buf and bind.request_of(buf) then
-                    bind.write_back(buf)
-                end
-            end,
-        },
-        {
-            key = k.send_all,
-            name = "send all",
+            key = k.run_all,
+            name = "Run All",
             run = function()
                 local buf = editor_target()
                 if buf then
@@ -123,8 +114,18 @@ local function footer_items()
             end,
         },
         {
+            key = k.save,
+            name = "Save",
+            run = function()
+                local buf = editor_target()
+                if buf and bind.request_of(buf) then
+                    bind.write_back(buf)
+                end
+            end,
+        },
+        {
             key = k.options,
-            name = "options",
+            name = "Option",
             run = function()
                 local buf, line = editor_target()
                 if buf then
@@ -133,8 +134,14 @@ local function footer_items()
             end,
         },
     }
+end
+
+--- The editor footer chips — display + click for the four panel actions (a key left empty drops its chip).
+---@return table[]
+local function footer_items()
+    local surface = require("lvim-ui.surface")
     local items = {}
-    for _, d in ipairs(defs) do
+    for _, d in ipairs(editor_actions()) do
         local disp = pretty_key(d.key)
         if disp then
             items[#items + 1] = surface.button({ name = d.name, key = disp, style = "action", run = d.run }, "action")
@@ -143,8 +150,37 @@ local function footer_items()
     return items
 end
 
---- Attach (or re-attach) the footer chip bar to the editor window. The bar auto-closes with its window, so a
---- re-open just attaches a fresh one; safe to call on every open/show.
+--- Bind the four panel actions as buffer-local `<localleader>` keys on `buf` — SCOPED to this editor panel, so
+--- they never touch a loose `.http` file's global keymaps. `<localleader>` (comma) is kept DISTINCT from the
+--- `<leader>` (space) command prefix, so `,r`/`,R`/`,s`/`,o` are unambiguous — no collision with `<leader>r…`
+--- and no shadowing of the editable buffer's normal-mode edit keys (r/R/s/o).
+---@param buf integer?
+local function bind_editor_keys(buf)
+    if not (buf and api.nvim_buf_is_valid(buf)) then
+        return
+    end
+    for _, d in ipairs(editor_actions()) do
+        if d.key and d.key ~= "" then
+            vim.keymap.set("n", d.key, d.run, {
+                buffer = buf,
+                silent = true,
+                desc = "lvim-rest: " .. d.name,
+            })
+        end
+    end
+    -- `<C-j>` descends from the editor INTO its footer chip bar (Run / Run All / Save / Option) — the bar's
+    -- own `<C-j>` then steps onto the response dock below, so the chips are keyboard-reachable, layer by layer.
+    vim.keymap.set("n", "<C-j>", function()
+        if footer_handle and footer_handle.enter then
+            footer_handle.enter()
+        else
+            pcall(vim.cmd, "wincmd j")
+        end
+    end, { buffer = buf, nowait = true, silent = true, desc = "lvim-rest: enter the editor footer bar" })
+end
+
+--- Attach (or re-attach) the footer chip bar to the editor window + bind its panel keys on the current buffer.
+--- The bar auto-closes with its window, so a re-open just attaches a fresh one; safe to call on every open/show.
 ---@param win integer?
 local function attach_footer(win)
     if not (win and api.nvim_win_is_valid(win)) then
@@ -154,7 +190,17 @@ local function attach_footer(win)
         pcall(footer_handle.close)
         footer_handle = nil
     end
-    footer_handle = require("lvim-ui.winfooter").attach(win, { items = footer_items(), align = "center" })
+    footer_handle = require("lvim-ui.winfooter").attach(win, {
+        items = footer_items(),
+        align = "center",
+        -- Keyboard footer nav: the chip bar is a layer between the editor and the response dock below it.
+        -- `<C-j>` on the editor enters the bar (see bind_editor_keys); the bar's own `<C-j>` runs THIS to
+        -- descend onto the dock.
+        nav_down = function()
+            pcall(vim.cmd, "wincmd j")
+        end,
+    })
+    bind_editor_keys(api.nvim_win_get_buf(win))
 end
 
 --- The placeholder shown in the editor pane before a request is opened — it tells you what to press.
@@ -164,11 +210,11 @@ local function placeholder()
         "# lvim-rest workbench",
         "#",
         "#   <CR>  open the request under the cursor in the library",
-        "#   S     send it        X  run the whole collection",
+        "#   r     Run the request     a  run All (a folder / collection)",
         "#   g?    every key the library panel has",
         "#",
         ("# Requests live in the library database — edit here and save with %s (no file on disk)."):format(
-            config.keys.save or "<localleader>w"
+            (config.workbench.keys or {}).save or "<localleader>s"
         ),
     }
 end

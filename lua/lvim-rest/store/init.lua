@@ -17,8 +17,10 @@ local store = require("lvim-utils.store")
 
 local M = {}
 
--- The current schema version. Bump + add a migration when the tables change. v3 adds the cookie jar.
-local VERSION = 4
+-- The current schema version. Bump + add a migration when the tables change. v3 adds the cookie jar;
+-- v5 adds the collection-level gRPC defaults column (`collection.grpc_json`); v6 the collection-level
+-- headers column (`collection.headers_json`) — collection vars reuse the v1 `vars_json` column.
+local VERSION = 6
 
 -- Declared tables. `history.request_id` is the FK that lets an ad-hoc run be saved into a
 -- collection later. Every `*_json` column holds an encoded Lua table (the library layer
@@ -77,7 +79,9 @@ local TABLES = {
         ord = { "integer" },
         description = { "text" },
         auth_json = { "text" },
-        vars_json = { "text" },
+        vars_json = { "text" }, -- collection-level variables, inherited by its requests (rendered as `@name = value`)
+        headers_json = { "text" }, -- collection-level headers, inherited by its requests (a request's own name overrides)
+        grpc_json = { "text" }, -- collection-level gRPC defaults (proto/import/authority/insecure), inherited by its requests
         pre_script = { "text" },
         post_script = { "text" },
     },
@@ -151,10 +155,19 @@ local TABLES = {
 
 -- Version steps. v2, v3 and v4 only ADD tables, and declared tables are created by the handles on
 -- open, so the steps themselves have nothing to alter — they exist to move `user_version` forward.
+-- v5 ADDS A COLUMN to an existing table, which `CREATE TABLE IF NOT EXISTS` cannot do — so it runs a
+-- real `ALTER TABLE`. It only fires on an existing db (a fresh one is stamped straight at VERSION and
+-- gets the column from the declared schema); the step is pcall-guarded, so a re-add is harmless.
 local MIGRATIONS = {
     [2] = function(_) end,
     [3] = function(_) end,
     [4] = function(_) end,
+    [5] = function(db)
+        db:exec("ALTER TABLE collection ADD COLUMN grpc_json TEXT")
+    end,
+    [6] = function(db)
+        db:exec("ALTER TABLE collection ADD COLUMN headers_json TEXT")
+    end,
 }
 
 ---@type table? the open store handle (nil until first use)

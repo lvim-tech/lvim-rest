@@ -206,12 +206,14 @@ local function open_request(node)
     pcall(vim.api.nvim_set_current_win, win)
 end
 
---- Send the request under the cursor straight from the tree.
+--- Run the request under the cursor: OPEN it in the editor pane first (so you see the `.http` being run),
+--- then send it. The response lands in the dock (and its log).
 ---@param node table?
 local function send_request(node)
     if not node or node.kind ~= "request" then
         return notify("put the cursor on a request first", vim.log.levels.WARN)
     end
+    open_request(node) -- show the request's `.http` in the editor (workbench centre pane / the window you came from)
     local buf = bind.open(node.data.id)
     if buf then
         require("lvim-rest.runner").send(buf, 1)
@@ -373,10 +375,22 @@ local function run_collection(node)
     if not cid then
         return notify("select a collection first", vim.log.levels.WARN)
     end
-    require("lvim-rest.runner.iterate").run({
-        collection_id = cid,
-        folder_id = (node and node.kind == "folder") and node.data.id or nil,
-    })
+    -- The RUN SHEET: a read-only document of every request in the folder/collection opens in the editor and
+    -- gains a live inline status per block as the run walks them; the full responses pile into the dock log.
+    local label = (node and node.data and node.data.name) or "collection"
+    require("lvim-rest.ui.batch").run(cid, (node and node.kind == "folder") and node.data.id or nil, label)
+end
+
+--- Open the COLLECTION SETTINGS form for the collection the cursor is inside — the collection-level
+--- defaults (headers, variables, and the gRPC proto / import / authority / insecure) inherited by every
+--- request in it. A folder or a request resolves to its owning collection.
+---@param node table?
+local function collection_settings(node)
+    local cid = collection_of(node)
+    if not cid then
+        return notify("select a collection first", vim.log.levels.WARN)
+    end
+    require("lvim-rest.ui.collection").open(cid)
 end
 
 --- The panel's actions. ONE table drives the keymaps, the footer chips and the help window, so a
@@ -385,21 +399,37 @@ end
 --- `bar = true` marks the two that FIT a ~34-column sidebar footer beside the `?` chip. A bar that
 --- overflows into chevrons shows a few chips and hides the rest, which is worse than a short bar
 --- plus a help window that lists everything.
----@type { key: string, name: string, desc: string, bar?: boolean, fn: fun(node: table?) }[]
+--- `bar_kinds` marks a CONTEXTUAL footer chip: it shows only when the cursor's node is one of those kinds,
+--- so the run action reads `r Run` on a request and `a All` on a folder/collection (they swap as the cursor
+--- moves — see `on_move` → `refresh_footer`). Both keys stay bound everywhere; on the wrong node they notify.
+---@type { key: string, name: string, desc: string, bar_kinds?: table<string, boolean>, fn: fun(node: table?) }[]
 local ACTIONS = {
-    { key = "S", name = "send", desc = "send the request under the cursor", bar = true, fn = send_request },
     {
-        key = "X",
-        name = "run",
-        desc = "run the collection (on a folder: that subtree)",
-        bar = true,
+        key = "r",
+        name = "Run",
+        desc = "send the request under the cursor",
+        bar_kinds = { request = true },
+        fn = send_request,
+    },
+    {
+        key = "a",
+        name = "All",
+        desc = "run everything under the cursor (a collection, or a folder's subtree)",
+        bar_kinds = { folder = true, collection = true },
         fn = run_collection,
     },
-    { key = "a", name = "new", desc = "new request", fn = new_request },
+    {
+        key = "S",
+        name = "settings",
+        desc = "collection settings — the headers / variables / gRPC defaults its requests inherit",
+        bar_kinds = { collection = true },
+        fn = collection_settings,
+    },
+    { key = "o", name = "new", desc = "new request", fn = new_request },
     { key = "d", name = "del", desc = "delete (asks first)", fn = delete },
     { key = "A", name = "folder", desc = "new folder", fn = new_folder },
     { key = "n", name = "collection", desc = "new collection", fn = new_collection },
-    { key = "r", name = "rename", desc = "rename", fn = rename },
+    { key = "e", name = "rename", desc = "rename", fn = rename },
     { key = "w", name = "workspace", desc = "switch / create a workspace", fn = switch_workspace },
     { key = "R", name = "refresh", desc = "re-read the library", fn = refresh },
 }
@@ -408,7 +438,7 @@ local ACTIONS = {
 local INHERITED = {
     { key = "<CR> / l", desc = "open the request (or expand a folder)" },
     { key = "h", desc = "collapse / jump to the parent" },
-    { key = "]e / [e", desc = "move the item among its siblings" },
+    { key = "J / K", desc = "move the item DOWN / UP among its siblings (also ]e / [e)" },
     { key = "g?", desc = "this window" },
     { key = "q", desc = "close the client" },
 }
@@ -435,6 +465,23 @@ local function show_help()
         items[#items + 1] = { a.key, a.desc }
     end
     require("lvim-ui").help({ title = "REST library", items = items, close_keys = { "q", "<Esc>", "g?" } })
+end
+
+---@type fun(node: table?): table[]  the CONTEXTUAL footer bars — declared here so the tree's `on_move` can
+--- re-derive them as the cursor changes node kind; defined below with the surface it needs.
+local footer_bars
+
+--- Repaint the panel's footer for the node the cursor is on now (the `r Run` / `a All` chip follows it).
+---@param node table?
+local function refresh_footer(node)
+    if panel and panel.set_footer then
+        pcall(panel.set_footer, { bars = footer_bars(node) })
+        -- A native-split footer is a container line, not a float chrome band: nudge a redraw so the swapped
+        -- chip paints now (set_footer updates the band state but the split's own repaint can lag a cursor move).
+        vim.schedule(function()
+            vim.cmd("redraw")
+        end)
+    end
 end
 
 --- Build (once) and return the tree handle. `handle.provider` is what a host surface renders.
@@ -467,6 +514,11 @@ function M.handle()
         on_collapse = function(node)
             folds[node.id] = false
         end,
+        -- The footer's run chip is CONTEXTUAL: `r Run` on a request, `a All` on a folder/collection. Re-derive
+        -- it every time the cursor lands on a new row so it always matches what's under the cursor.
+        on_move = function(node)
+            refresh_footer(node)
+        end,
         -- The handle cannot outlive its window: drop it so the next open builds a live one.
         on_close = function()
             tree, panel = nil, nil
@@ -479,25 +531,34 @@ function M.handle()
                     action.fn(tree and tree.selected() or nil)
                 end)
             end
-            map("]e", function()
+            -- Reorder among siblings: `J` down / `K` up (like moving a line), and `]e` / `[e` as the
+            -- bracket-motion aliases. Order matters for a collection run — put a login request first so a
+            -- later request can chain its token (`authorization: {{signin.…}}`).
+            local function move_down()
                 move(tree and tree.selected() or nil, 1)
-            end)
-            map("[e", function()
+            end
+            local function move_up()
                 move(tree and tree.selected() or nil, -1)
-            end)
+            end
+            map("J", move_down)
+            map("K", move_up)
+            map("]e", move_down)
+            map("[e", move_up)
         end,
     })
     return tree
 end
 
---- The footer button band: the same actions the keys run, as clickable chips. DISPLAY plus click —
---- the keys are already bound on the panel, so a chip's `run` is the mouse path to the same thing.
+--- The footer button band, CONTEXTUAL to `node`: the run chip whose `bar_kinds` includes the node's kind
+--- (`r Run` on a request, `a All` on a folder/collection), then the always-present help + close. DISPLAY plus
+--- click — the keys are already bound on the panel, so a chip's `run` is the mouse path to the same thing.
+---@param node table?  the node under the cursor
 ---@return table[]
-local function footer_bars()
+footer_bars = function(node)
     local surface = require("lvim-ui.surface")
     local items = {}
     for _, action in ipairs(ACTIONS) do
-        if action.bar then
+        if action.bar_kinds and node and action.bar_kinds[node.kind] then
             items[#items + 1] = surface.button({
                 name = action.name,
                 key = action.key,
@@ -553,7 +614,12 @@ function M.open(opts)
         size = { width = { fixed = opts.width or 34 } },
         content = { blocks = { { id = "library", provider = handle.provider } } },
         close_keys = {},
-        footer = { bars = footer_bars() },
+        footer = { bars = footer_bars(handle and handle.selected and handle.selected() or nil) },
+        -- `<C-j>` steps from the tree DOWN into the footer chip bar (r Run / a All / help / close), `<C-l>`/
+        -- `<C-h>` move between chips, `<CR>` runs one, `<C-k>`/`q` step back up — the keyboard path to the
+        -- footer a float surface already has (the chips are also mouse-clickable, and their keys are live on
+        -- the list, so this is convenience, not the only way).
+        footer_nav = true,
     })
     return panel
 end

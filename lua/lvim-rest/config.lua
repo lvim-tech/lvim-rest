@@ -24,17 +24,29 @@
 ---@field span     "stacked"|"full"   The layout STATE. state 1 "stacked": tree full-height, right column editor(top)/response(bottom). state 2 "full": tree+editor on top, result full-width below. `:LvimRest dock` toggles them.
 ---@field size     LvimRestWorkbenchDockSize  Per-state height fractions
 
+---@class LvimRestWorkbenchKeys
+---@field run     string|false  Send the request under the cursor (editor panel, localleader)
+---@field run_all string|false  Send every request in the buffer (editor panel, localleader)
+---@field save    string|false  Save the request back to its library row (editor panel, localleader)
+---@field options string|false  Open the request options form (editor panel, localleader)
+
 ---@class LvimRestWorkbenchConfig
 ---@field explorer_width integer                LEFT collection-tree width (columns)
+---@field keys           LvimRestWorkbenchKeys   Editor-panel buffer-local action keys (localleader)
 ---@field dock           LvimRestWorkbenchDock   Response dock placement in the workbench tab
 
 ---@class LvimRestDockSize
 ---@field height integer                         Bottom-dock height (rows)
 ---@field float  { width: number, height: number } Float-dock size (fractions of the editor)
 
+---@class LvimRestDockCache
+---@field enabled boolean  Keep every response in the log so the open key shows it (no re-send)
+---@field size    integer  Max number of responses kept in the session log
+
 ---@class LvimRestDockConfig
 ---@field layout "float"|"area"|"bottom"  Inline dock layout when sending from a loose .http file
 ---@field size   LvimRestDockSize          Dock geometry per layout
+---@field cache  LvimRestDockCache         Response-log cache (the dock's `log` tab)
 
 ---@class LvimRestEnvConfig
 ---@field scope    "project"|"buffer"  Active-env scope: sticky per project root, or per file
@@ -95,12 +107,24 @@
 ---@field keys   LvimRestOptionsKeys
 ---@field tabs   { params: LvimRestOptionsTab, headers: LvimRestOptionsTab, auth: LvimRestOptionsTab, body: LvimRestOptionsTab, settings: LvimRestOptionsTab }
 
+---@class LvimRestCollectionKeys
+---@field add    string  add a header / variable / gRPC path to the tab under the cursor
+---@field delete string  delete the focused entry
+---@field rename string  rename the focused header / variable name
+---@field clear  string  clear every entry in the current tab
+---@field help   string  the panel's key help
+
+---@class LvimRestCollectionConfig
+---@field layout "float"|"area"|"bottom"  Panel layout
+---@field keys   LvimRestCollectionKeys
+---@field tabs   { headers: LvimRestOptionsTab, vars: LvimRestOptionsTab, grpc: LvimRestOptionsTab }
+
 ---@class LvimRestUiConfig
----@field options LvimRestOptionsConfig  The request-options form (`:LvimRest options`)
+---@field options    LvimRestOptionsConfig     The request-options form (`:LvimRest options`)
+---@field collection LvimRestCollectionConfig  The collection-settings form (`S` in the library tree)
 
 ---@class LvimRestKeys
 ---@field send           string  Send the request under the cursor
----@field save           string  Save the edited request back to its library row
 ---@field send_all       string  Send every request in the buffer
 ---@field replay         string  Replay the last request
 ---@field cancel         string  Cancel in-flight request(s)
@@ -181,6 +205,15 @@ return {
     -- dock stacked in the RIGHT column — the editor on top, the response below it.
     workbench = {
         explorer_width = 34,
+        -- The editor panel's OWN buffer-local action keys — `<localleader>` (SCOPED to this panel, distinct from
+        -- the global http `keys` above). Each is `<localleader>` + a letter, so it never shadows a normal-mode
+        -- edit key (r/R/s/o) in the editable request buffer. The editor chip bar advertises exactly these.
+        keys = {
+            run = "<localleader>r", -- send the request under the cursor
+            run_all = "<localleader>a", -- send every request in the buffer
+            save = "<localleader>s", -- save the request back to its library row
+            options = "<localleader>o", -- open the request options form
+        },
         dock = {
             position = "bottom", -- state-1 side: "bottom" (below the editor) | "right" (beside it)
             span = "stacked", -- start in state 1: "stacked" (tree full-height) — toggle to "full" with :LvimRest dock
@@ -194,6 +227,10 @@ return {
     dock = {
         layout = "bottom", -- "float" | "area" | "bottom"
         size = { height = 15, float = { width = 0.85, height = 0.8 } },
+        -- The response LOG (a `log` tab in the dock, like lvim-db's call log): every response is kept, opening
+        -- one shows its cached body (no re-send), and a whole send-all sweep is listed. `enabled = false` ⇒ the
+        -- open key re-sends instead (the log footer buttons change to match); `size` caps the kept responses.
+        cache = { enabled = true, size = 50 },
     },
     default_view = "body", -- body|headers|both|verbose|stats|script|report
     env = { scope = "project", default = "dev", hud_chip = true },
@@ -253,6 +290,23 @@ return {
                 settings = { label = "Settings", icon = "󰒓" },
             },
         },
+        -- The COLLECTION settings form (`S` in the library tree): collection-level defaults inherited by
+        -- every request in the collection. Today the gRPC defaults (proto / import / authority / insecure).
+        collection = {
+            layout = "float", -- "float" | "area" | "bottom"
+            keys = {
+                add = "a", -- add a header / variable / gRPC path entry
+                delete = "d", -- delete the focused entry
+                rename = "r", -- rename the focused header / variable name
+                clear = "x", -- clear every entry in the current tab
+                help = "?",
+            },
+            tabs = {
+                headers = { label = "Headers", icon = "󰈻" },
+                vars = { label = "Variables", icon = "󰀫" },
+                grpc = { label = "gRPC", icon = "󰢌" },
+            },
+        },
     },
     scripts = { enabled = true, show_report = "on_failure" }, -- always | on_failure | never
     history = { enabled = true, bodies = false, max_entries = 500 },
@@ -260,18 +314,17 @@ return {
     prompt = { cache = true },
     inline_status = true,
     keys = {
-        send = "<CR>",
-        save = "<localleader>w", -- save the edited request back to the library (the `nofile` buffer has no `:w`)
-        send_all = "<leader>ra",
-        replay = "<leader>rr",
-        cancel = "<leader>rx",
-        inspect = "<leader>ri",
+        send = "<localleader>r", -- Run
+        send_all = "<localleader>a", -- Run All
+        replay = "<localleader>p",
+        cancel = "<localleader>x",
+        inspect = "<localleader>i",
         jump_next = "]r",
         jump_prev = "[r",
-        explorer = "<leader>rc",
-        run_collection = "<leader>rR",
-        save_into = "<leader>rs",
-        options = "<leader>ro",
+        explorer = "<localleader>c",
+        run_collection = "<localleader>R",
+        save_into = "<localleader>v",
+        options = "<localleader>o",
     },
     -- Real Nerd Font single-width glyphs (verified via strdisplaywidth); `➤` for pointers/separators.
     icons = {
