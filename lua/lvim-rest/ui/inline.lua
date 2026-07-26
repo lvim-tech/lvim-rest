@@ -118,7 +118,7 @@ function M.start(bufnr, line, method)
     end
     local entry = { id = id, frame = 1, timer = nil }
     marks[key(bufnr, line)] = entry
-    local timer = (vim.uv or vim.loop).new_timer()
+    local timer = vim.uv.new_timer()
     entry.timer = timer
     timer:start(
         80,

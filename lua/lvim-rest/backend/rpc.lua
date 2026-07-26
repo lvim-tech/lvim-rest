@@ -9,7 +9,7 @@
 --
 ---@module "lvim-rest.backend.rpc"
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("lvim-rest.config")
 
 local M = {}

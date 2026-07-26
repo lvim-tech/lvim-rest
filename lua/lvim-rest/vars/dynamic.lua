@@ -19,7 +19,7 @@ local function uuid4()
     )
 end
 
-math.randomseed((vim.uv or vim.loop).hrtime() % 2147483647)
+math.randomseed(vim.uv.hrtime() % 2147483647)
 
 ---@type table<string, fun(args: string[]): string>
 local registry = {
