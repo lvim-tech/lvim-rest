@@ -17,7 +17,7 @@
 --
 ---@module "lvim-rest.auth.oauth2"
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("lvim-rest.config")
 local store = require("lvim-rest.store")
 local vault = require("lvim-rest.vars.vault")
@@ -372,9 +372,12 @@ local function open_browser(url)
         argv[#argv + 1] = url
         return pcall(vim.system, argv) and true or false
     end
-    if vim.ui.open then
-        local ok = pcall(vim.ui.open, url)
-        return ok
+    -- Through the shared opener: `vim.ui.open` reports "no handler" by RETURNING `nil, err`, so a bare
+    -- `pcall` status would claim the consent page opened when it did not — and the flow would then wait
+    -- for a redirect the user never saw.
+    local ok_utils, utils = pcall(require, "lvim-utils.utils")
+    if ok_utils and type(utils.open_url) == "function" then
+        return (utils.open_url(url))
     end
     return false
 end
