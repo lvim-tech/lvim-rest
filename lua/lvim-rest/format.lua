@@ -36,10 +36,9 @@ end
 ---@param t table
 ---@return boolean
 local function is_array(t)
-    if vim.islist then
-        return vim.islist(t)
-    end
-    return vim.tbl_islist(t)
+    -- `vim.tbl_islist` is gone from the supported Neovim, so there is no fallback to keep — the
+    -- branch could only ever have run on a version this set does not support.
+    return vim.islist(t)
 end
 
 --- Encode a decoded JSON value with indentation. `sort_keys` orders object keys.
