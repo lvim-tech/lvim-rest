@@ -47,7 +47,7 @@ local function set_editor_title(win, text)
     vim.wo[win].winbar = "%=" .. text .. "%="
 end
 
--- ── the editor footer button bar (lvim-ui.winfooter) ─────────────────────────
+-- ── the editor footer button bar (lvim-ui.winband) ─────────────────────────
 -- The editor pane carries a bottom chip bar — send / save / send all / options — exactly like the lvim-db
 -- editor's footer. The chips are display + click; the keys themselves are the buffer-local maps installed by
 -- `attach_buffer` (init.lua), so the bar just mirrors them and every click routes through the SAME handler as
@@ -190,7 +190,7 @@ local function attach_footer(win)
         pcall(footer_handle.close)
         footer_handle = nil
     end
-    footer_handle = require("lvim-ui.winfooter").attach(win, {
+    footer_handle = require("lvim-ui.winband").attach(win, {
         items = footer_items(),
         align = "center",
         -- Keyboard footer nav: the chip bar is a layer between the editor and the response dock below it.
