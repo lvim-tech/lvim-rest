@@ -162,25 +162,21 @@ function M.open(resolved, cb)
 
     -- The daemon stamps every later notification with the id that OPENED the session, so the third
     -- callback argument is the session handle — nothing has to be invented or looked up.
-    rpc.request(
-        "ws.open",
-        { url = resolved.url, headers = headers, subprotocols = subprotocols },
-        function(res, err, id)
-            if err then
-                if cb then
-                    cb({ error = err })
-                end
-                return
-            end
-            local session = { id = id, url = resolved.url, open = true, messages = {} }
-            sessions[id] = session
-            current = id
-            notify(("websocket open → %s"):format(resolved.url))
+    rpc.request("ws.open", { url = resolved.url, headers = headers, subprotocols = subprotocols }, function(_, err, id)
+        if err then
             if cb then
-                cb(M.result(session))
+                cb({ error = err })
             end
+            return
         end
-    )
+        local session = { id = id, url = resolved.url, open = true, messages = {} }
+        sessions[id] = session
+        current = id
+        notify(("websocket open → %s"):format(resolved.url))
+        if cb then
+            cb(M.result(session))
+        end
+    end)
 end
 
 --- Send a frame on a session (the current one by default).

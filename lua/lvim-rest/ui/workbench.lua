@@ -174,7 +174,10 @@ local function bind_editor_keys(buf)
         if footer_handle and footer_handle.enter then
             footer_handle.enter()
         else
-            pcall(vim.cmd, "wincmd j")
+            -- `vim.cmd` is a callable TABLE, so it cannot be pcall's first argument.
+            pcall(function()
+                vim.cmd("wincmd j")
+            end)
         end
     end, { buffer = buf, nowait = true, silent = true, desc = "lvim-rest: enter the editor footer bar" })
 end
@@ -197,7 +200,9 @@ local function attach_footer(win)
         -- `<C-j>` on the editor enters the bar (see bind_editor_keys); the bar's own `<C-j>` runs THIS to
         -- descend onto the dock.
         nav_down = function()
-            pcall(vim.cmd, "wincmd j")
+            pcall(function()
+                vim.cmd("wincmd j")
+            end)
         end,
     })
     bind_editor_keys(api.nvim_win_get_buf(win))

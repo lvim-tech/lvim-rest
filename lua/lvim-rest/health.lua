@@ -16,7 +16,7 @@ local M = {}
 ---@param lang string
 ---@return boolean
 local function has_parser(lang)
-    local ok, has = pcall(function()
+    local ok = pcall(function()
         return vim.treesitter.language.add and vim.treesitter.language.add(lang) or vim.treesitter.get_string_parser
     end)
     if not ok then

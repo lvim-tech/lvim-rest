@@ -299,7 +299,13 @@ end
 ---@param text string|string[]  the buffer text (a string or a list of lines)
 ---@return LvimRestDocument
 function M.parse(text)
-    local lines = type(text) == "table" and text or vim.split(text, "\n", { plain = true })
+    ---@type string[]
+    local lines
+    if type(text) == "table" then
+        lines = text
+    else
+        lines = vim.split(text, "\n", { plain = true })
+    end
     ---@type LvimRestDocument
     local doc = { requests = {}, vars = {}, imports = {}, has_requests = false }
 

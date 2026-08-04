@@ -277,8 +277,19 @@ end
 ---@return function? cancel, string? err
 function M.loopback(port, timeout, cb)
     local server = uv.new_tcp()
-    local done = false
     local timer = uv.new_timer()
+    -- luv returns nil when the loop cannot allocate a handle; report it the same way an occupied
+    -- port is reported, so no caller ever sees a half-built listener.
+    if not server or not timer then
+        if server then
+            server:close()
+        end
+        if timer then
+            timer:close()
+        end
+        return nil, "could not create the loopback listener handles"
+    end
+    local done = false
 
     local function finish(params, err)
         if done then
@@ -308,6 +319,9 @@ function M.loopback(port, timeout, cb)
                 return finish(nil, tostring(listen_err))
             end
             local client = uv.new_tcp()
+            if not client then
+                return
+            end
             server:accept(client)
             client:read_start(function(read_err, chunk)
                 if read_err or not chunk then
@@ -417,10 +431,9 @@ local function authorize_url(profile, redirect, state, challenge)
 end
 
 --- The interactive grant: open the browser, catch the redirect, exchange the code.
----@param id string
 ---@param profile table
 ---@param cb fun(token: LvimRestToken?, err: string?)
-local function authorization_code(id, profile, cb)
+local function authorization_code(profile, cb)
     local port = tonumber(field(profile, "redirect_port")) or config.auth.oauth2.redirect_port
     local redirect = field(profile, "redirect_uri") or ("http://127.0.0.1:%d/callback"):format(port)
     -- `state` is a CSRF check: the redirect must carry back the value we sent.
@@ -469,11 +482,10 @@ local function authorization_code(id, profile, cb)
     end
 end
 
---- Acquire a token for `id` by running its grant.
----@param id string
+--- Acquire a token by running the profile's grant.
 ---@param profile table
 ---@param cb fun(token: LvimRestToken?, err: string?)
-local function acquire(id, profile, cb)
+local function acquire(profile, cb)
     local grant = M.grant_of(profile)
     if grant == "client_credentials" then
         return token_request(profile, {
@@ -493,7 +505,7 @@ local function acquire(id, profile, cb)
             scope = field(profile, "scope"),
         }, cb)
     elseif grant == "authorization_code" then
-        return authorization_code(id, profile, cb)
+        return authorization_code(profile, cb)
     end
     cb(nil, ("unsupported grant type %q"):format(grant))
 end
@@ -530,10 +542,10 @@ function M.token(id, profile, cb)
                 return acquired(new)
             end
             notify(("refresh failed (%s) — re-authorising"):format(tostring(err)), vim.log.levels.WARN)
-            acquire(id, profile, acquired)
+            acquire(profile, acquired)
         end)
     end
-    acquire(id, profile, acquired)
+    acquire(profile, acquired)
 end
 
 return M

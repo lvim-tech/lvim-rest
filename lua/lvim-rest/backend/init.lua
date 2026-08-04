@@ -27,10 +27,10 @@ function M.daemon_available()
     return ok and rpc.binary_path and rpc.binary_path() ~= nil
 end
 
---- The engine that WILL run a request of `method`: "daemon" or "curl".
----@param method string?
+--- The engine that WILL run a request: "daemon" or "curl". The choice is per-configuration, not
+--- per-request — every method the parser produces can be executed by either engine.
 ---@return "daemon"|"curl"
-function M.select(method)
+function M.select()
     if config.backend == "curl" then
         return "curl"
     end
@@ -51,7 +51,7 @@ end
 ---@param cb fun(result: table)
 ---@return { kill: fun() }
 function M.run(resolved, cb)
-    local engine = M.select(resolved.method)
+    local engine = M.select()
 
     if engine == "daemon" then
         local ok, rpc = pcall(require, "lvim-rest.backend.rpc")

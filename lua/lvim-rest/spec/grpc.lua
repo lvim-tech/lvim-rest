@@ -74,7 +74,7 @@ function M.reflect(req, ctx, cb)
         proto = protos,
         import_paths = imports,
         methods = true,
-    }, function(res, _err)
+    }, function(res)
         if type(res) == "table" and res.services then
             cache.set(key, res)
             cb(res)

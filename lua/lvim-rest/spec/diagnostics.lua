@@ -43,10 +43,14 @@ end
 local function debounced(bufnr)
     local ok_cfg, config = pcall(require, "lvim-rest.config")
     local ms = (ok_cfg and config.diagnostics and config.diagnostics.debounce) or 300
+    ---@type uv.uv_timer_t?
     local t = timers[bufnr]
     if not t then
         t = vim.uv.new_timer()
         timers[bufnr] = t
+    end
+    if not t then
+        return
     end
     t:stop()
     t:start(

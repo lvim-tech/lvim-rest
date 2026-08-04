@@ -201,6 +201,9 @@ end
 --- Send a raw request object (only when `job` is live).
 ---@param obj table
 local function send(obj)
+    if not job then
+        return
+    end
     vim.fn.chansend(job, vim.json.encode(obj) .. "\n")
     touch_idle()
 end

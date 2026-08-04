@@ -95,7 +95,7 @@ end
 --- An OAuth2 scope list — whitespace-separated tokens. Effectively always valid; kept as a NAME so
 --- the panel/cmp can document the space-separated shape.
 ---@type LvimRestFormatChecker
-function M.scope_list(_value)
+function M.scope_list(_)
     return nil
 end
 

@@ -520,36 +520,36 @@ local LISTS = {
 --- One accordion of a repeatable directive. Its children are the entries in document order, each
 --- bound to the line it was read from.
 ---@param req LvimRestRequest
----@param spec table  a LISTS entry
+---@param list_spec table  a LISTS entry
 ---@return table
-local function list_section(req, spec)
-    local entries = spec.entries(req)
-    local lines = req.directive_lines[spec.key] or {}
+local function list_section(req, list_spec)
+    local entries = list_spec.entries(req)
+    local lines = req.directive_lines[list_spec.key] or {}
     local children = {}
     for i, e in ipairs(entries) do
         local lnum = lines[i]
         children[i] = {
             type = "string",
-            name = ("dir:%s:%d"):format(spec.key, i),
+            name = ("dir:%s:%d"):format(list_spec.key, i),
             label = e.label,
             value = e.value,
             disabled = lnum == nil, -- no anchor (a malformed line): show it, never rewrite it
             run = function(value)
                 if state.editor and lnum then
-                    state.editor:set_directive_line(lnum, spec.key, vim.trim(e.label .. " " .. value))
+                    state.editor:set_directive_line(lnum, list_spec.key, vim.trim(e.label .. " " .. value))
                 end
                 M.refresh()
             end,
         }
     end
     if #children == 0 then
-        children[1] = note("none", "dir:" .. spec.key)
+        children[1] = note("none", "dir:" .. list_spec.key)
     end
     return fold({
-        name = "sec:" .. spec.key,
-        label = spec.label,
+        name = "sec:" .. list_spec.key,
+        label = list_spec.label,
         count = #entries,
-        accent = spec.accent,
+        accent = list_spec.accent,
         expanded = #entries > 0,
         children = children,
     })
@@ -639,8 +639,8 @@ local function settings_rows(req)
         directive_row("jq", "jq filter", "string", d.jq or ""),
         { type = "spacer_line" },
     }
-    for _, spec in ipairs(LISTS) do
-        rows[#rows + 1] = list_section(req, spec)
+    for _, list_spec in ipairs(LISTS) do
+        rows[#rows + 1] = list_section(req, list_spec)
     end
     rows[#rows + 1] = curl_section(req)
 
@@ -782,11 +782,11 @@ local function action_add()
     -- Settings: which repeatable directive gets a new entry is decided by the section the cursor is in.
     local name = focused_name()
     local key = name:match("^dir:([%w%-]+):%d+$") or name:match("^sec:([%w%-]+)$") or name:match("^note:dir:(.+)$")
-    for _, spec in ipairs(LISTS) do
-        if key == spec.key then
-            return ask(spec.prompt, "", function(text)
+    for _, list_spec in ipairs(LISTS) do
+        if key == list_spec.key then
+            return ask(list_spec.prompt, "", function(text)
                 if text ~= "" then
-                    ed:add_directive(spec.key, text)
+                    ed:add_directive(list_spec.key, text)
                     refresh_soon()
                 end
             end)
