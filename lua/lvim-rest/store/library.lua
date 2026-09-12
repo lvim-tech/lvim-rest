@@ -223,7 +223,7 @@ function M.rename_workspace(id, name)
     return d:update("workspace", { id = id }, { name = name, updated = now() }) ~= false
 end
 
---- Delete a workspace and everything under it (collections → folders/requests/examples, envs).
+--- Delete a workspace and everything under it (collections → folders/requests/examples/runs, envs).
 ---@param id integer
 ---@return boolean
 function M.delete_workspace(id)
@@ -331,7 +331,8 @@ function M.update_collection(id, fields)
     return d:update("collection", { id = id }, set) ~= false
 end
 
---- Delete a collection and its folders / requests / examples.
+--- Delete a collection and its folders / requests / examples, and the collection runner's history
+--- for it (its `run` rows and their `run_result`s — they used to stay behind as orphans).
 ---@param id integer
 ---@return boolean
 function M.delete_collection(id)
@@ -344,6 +345,10 @@ function M.delete_collection(id)
     end
     d:remove("request", { collection_id = id })
     d:remove("folder", { collection_id = id })
+    for _, run in ipairs(d:find("run", { collection_id = id }) or {}) do
+        d:remove("run_result", { run_id = run.id })
+    end
+    d:remove("run", { collection_id = id })
     return d:remove("collection", { id = id }) ~= false
 end
 
