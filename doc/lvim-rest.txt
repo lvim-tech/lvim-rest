@@ -150,12 +150,19 @@ The response opens in a docked lvim-ui surface. The header bar switches views
   both      headers then body
   stats     timing split, sizes, HTTP version, engine
   verbose   the full request/response transcript
-  script    script output (roadmap)
-  report    assertions (roadmap)
+  script    `client.log` output of the post-response script
+  report    the script's tests / assertions (see |lvim-rest-scripting|)
+  log       the session RESPONSE LOG: every response so far, newest first
 
 A `jq` button filters the body live. The footer actions are yank / save /
-copy-as-curl / replay / close. An oversized body (`format.max_size`) is diverted
-to a scratch file and the dock shows the notice + the headers/stats views.
+copy-as-curl / replay / close; the save prompt suggests an extension from the
+response's Content-Type. An oversized body (`format.max_size`) is diverted to a
+scratch file and the dock shows the notice + the headers/stats views.
+
+In the `log` view `<CR>` opens the focused response from its cache (no
+re-send) and `R` re-sends it as a new row. `dock.cache` controls it:
+`enabled = false` drops the cache (the open button re-sends instead) and
+`size` caps how many responses are kept (50).
 
 ==============================================================================
 8. AUTHENTICATION                                            *lvim-rest-auth*
@@ -382,18 +389,31 @@ shell.
 
 Keys in the tree: >
 
-  <CR>      open the request under the cursor in the editor
-  S         send it
-  X         run the whole collection (on a folder: just that subtree)
-  a A n     new request / folder / collection
-  r d       rename / delete
-  ]e [e     move the item among its siblings
-  w         switch workspace
-  R         refresh
-  ?         a window listing every key the panel has
+  <CR> / l  open the request under the cursor in the editor
+  r         send the request under the cursor
+  a         run everything under the cursor (a collection, or a folder's
+            subtree)
+  S         the collection settings (headers / variables / gRPC defaults
+            its requests inherit)
+  o A n     new request / folder / collection
+  e d       rename / delete (delete asks first — `library.confirm_delete`)
+  J K       move the item down / up among its siblings (also ]e / [e)
+  w         switch / create a workspace
+  R         re-read the library
+  g?        a window listing every key the panel has
+  q         close the client
 <
-The footer carries the everyday actions as clickable chips; the rest are keys,
-because a bar that overflows into chevrons hides more than it shows.
+The footer chip follows the cursor (`r Run` on a request, `a All` on a folder
+or collection) beside help / close; the rest are keys, because a bar that
+overflows into chevrons hides more than it shows.
+
+                                                    *lvim-rest-collection*
+`S` on a collection opens its SETTINGS form — a tabbed panel of the defaults
+every request in the collection inherits: Headers, Variables, and (when the
+collection holds a GRPC request) the gRPC defaults (proto files, import dirs,
+authority, insecure). The keys are `ui.collection.keys`: `a` add, `d` delete,
+`r` rename a header / variable, `x` clear the current tab, `?` help. The form
+writes straight to the library (a collection has no buffer of its own).
 
 `:LvimRest` is idempotent — called again it just refocuses the tree, never
 a second copy. Close the client with `q` in any panel; the fold state survives
@@ -510,12 +530,20 @@ library row is not duplicated — the editor panel's save key (`<localleader>s`)
 ==============================================================================
 14a. THE REQUEST OPTIONS FORM                              *lvim-rest-options*
 
-`:LvimRest options` (or `<leader>ro`) opens a form over the request under the
+`:LvimRest options` (or `<localleader>o`) opens a form over the request under the
 cursor — in a loose `.http` file and in a request opened from the library
-alike. Three tabs:
+alike. The tabs:
 
   Params     one row per query parameter of the request line
   Headers    one row per header LINE, including the ones commented out
+  Auth       the `# @auth` scheme select + the selected scheme's fields,
+             from the same spec the validator and the cmp source read
+  Body       the body type (json / graphql / grpc message / form / raw /
+             file / none) and its fields; a multi-line body opens the
+             scratch body editor
+  gRPC       only for a GRPC request: endpoint / service / method (selects
+             when reflection or a .proto is available), @grpc-authority,
+             @grpc-insecure
   Settings   @timeout, @no-log, @no-cookie-jar, @accept, @jq, a fold per
              repeatable directive (@prompt, @stdin-cmd, @env-stdin-cmd,
              @curl-*), and a read-only fold of the directives lvim-rest does
@@ -529,6 +557,9 @@ Keys (all configurable under `ui.options.keys`):
   t      switch a header line off / on
   r      rename a parameter / header
   s      send this request and close
+  v      store the focused Auth secret in lvim-keyring and rewrite it to a
+         {{vault "…"}} reference
+  e      edit the request body in a multi-line scratch editor
   ?      the key help
   h / l  switch tab           q  close
 

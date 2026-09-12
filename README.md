@@ -27,9 +27,11 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
 - **Interactive prompts** — `# @prompt var [description]`; asked once, cached per session.
 - **Metadata directives** — `# @name`, `# @timeout ms`, `# @no-log`, `# @no-cookie-jar`,
   `# @accept chunked`, `# @jq expr`, `# @curl-<flag>[=value]`, `# @prompt`, `# @stdin-cmd`.
-- **A themed response dock** — body / headers / both / stats / verbose / script / report views (the
-  body highlighted by treesitter for its Content-Type), a live `jq` filter, and footer actions
-  (yank / save / copy-as-curl / replay). Oversized bodies divert to a scratch file.
+- **A themed response dock** — body / headers / both / stats / verbose / script / report / log views
+  (the body highlighted by treesitter for its Content-Type), a live `jq` filter, and footer actions
+  (yank / save / copy-as-curl / replay). The `log` view is the session response log: every response
+  is kept (`dock.cache`), opening one shows its cached body, `R` re-sends it. Oversized bodies divert
+  to a scratch file.
 - **Inline status** — a per-request end-of-line lane: a spinner while running, then
   `➤ 200 OK · 132 ms` in the status accent.
 - **History** — every executed request is logged (sqlite); `:LvimRest history` reopens or lists past
@@ -82,7 +84,7 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
 
 ## Requirements
 
-- Neovim ≥ 0.10
+- Neovim ≥ 0.12 (what the lvim-ui dependency requires)
 - [lvim-utils](https://github.com/lvim-tech/lvim-utils), [lvim-ui](https://github.com/lvim-tech/lvim-ui)
 - `curl` on `PATH` (the fallback engine) — or build the Rust daemon (below)
 - Optional: a Rust toolchain (build the daemon), `jq` (JSON `jq` filter), `xmllint` (XML format),
@@ -214,13 +216,16 @@ sends one request per row.
 
 ## The request options form
 
-`:LvimRest options` (or `<leader>ro`) opens a Postman-style form over the request under the cursor —
+`:LvimRest options` (or `<localleader>o`) opens a Postman-style form over the request under the cursor —
 in a loose `.http` file and in a request opened from the library alike.
 
 | Tab | Rows |
 | --- | --- |
 | Params | one row per query parameter of the request line |
 | Headers | one row per header LINE, including the ones commented out |
+| Auth | the `# @auth` scheme select + the selected scheme's fields (from the shared spec, so it can never disagree with the validator) |
+| Body | the body type (json / graphql / grpc message / form / raw / file / none) + its fields; a multi-line body opens the scratch editor |
+| gRPC | only for a `GRPC` request: endpoint / service / method (selects when reflection or a `.proto` is available), `@grpc-authority`, `@grpc-insecure` |
 | Settings | `@timeout` · `@no-log` · `@no-cookie-jar` · `@accept` · `@jq`, plus a fold per repeatable directive (`@prompt`, `@stdin-cmd`, `@env-stdin-cmd`, `@curl-*`) and a read-only fold of the directives lvim-rest does not know |
 
 | Key | Action |
@@ -231,7 +236,11 @@ in a loose `.http` file and in a request opened from the library alike.
 | `t` | switch a header line off / on |
 | `r` | rename a parameter / header |
 | `s` | send this request and close |
+| `v` | store the focused Auth secret in lvim-keyring (rewrites it to a `{{vault "…"}}` reference) |
+| `e` | edit the request body in a multi-line scratch editor |
 | `?` | the key help |
+
+All keys are configurable under `ui.options.keys`.
 
 **The document stays the single source of truth.** The form is a view over the parsed request: every
 row is built from a fresh parse of the buffer and every change is written back as buffer TEXT, one
@@ -451,8 +460,14 @@ require("lvim-rest").setup({
     dock = { -- the inline dock when sending from a loose .http file
         layout = "bottom", -- "float" | "area" | "bottom"
         size = { height = 15, float = { width = 0.85, height = 0.8 } },
+        -- the session response LOG (the dock's `log` view): every response is kept, opening one shows its
+        -- cached body (no re-send); `enabled = false` makes the log's open key re-send; `size` caps the kept rows
+        cache = { enabled = true, size = 50 },
     },
-    default_view = "body", -- body|headers|both|verbose|stats|script|report
+    -- structural diagnostics on .http buffers (unknown auth scheme, missing args, malformed JSON body,
+    -- near-miss directives) via vim.diagnostic, debounced while typing
+    diagnostics = { enabled = true, debounce = 300 },
+    default_view = "body", -- body|headers|both|verbose|stats|script|report|log
     env = { scope = "project", default = "dev", hud_chip = true }, -- scope: "project" | "buffer"
     request = {
         timeout = 30000,
@@ -489,13 +504,40 @@ require("lvim-rest").setup({
     },
     -- The interactive panels (every label, icon, key and layout an option).
     ui = {
-        options = {
+        options = { -- the request options form (`:LvimRest options`)
             layout = "float", -- "float" | "area" | "bottom"
-            keys = { add = "a", delete = "d", toggle = "t", rename = "r", send = "s", help = "?" },
+            keys = {
+                add = "a",
+                delete = "d",
+                toggle = "t",
+                rename = "r",
+                send = "s",
+                keyring = "v", -- store the focused Auth secret in lvim-keyring (rewrites it to {{vault "…"}})
+                edit_body = "e", -- edit the body in a multi-line scratch editor
+                help = "?",
+            },
             tabs = {
                 params = { label = "Params", icon = "󰘲" },
                 headers = { label = "Headers", icon = "󰈻" },
+                auth = { label = "Auth", icon = "󰌆" },
+                body = { label = "Body", icon = "󰈔" },
+                grpc = { label = "gRPC", icon = "󰢌" }, -- shown only for a GRPC request
                 settings = { label = "Settings", icon = "󰒓" },
+            },
+        },
+        collection = { -- the collection settings form (`S` in the library tree)
+            layout = "float", -- "float" | "area" | "bottom"
+            keys = {
+                add = "a", -- add a header / variable / gRPC path entry
+                delete = "d", -- delete the focused entry
+                rename = "r", -- rename the focused header / variable
+                clear = "x", -- clear every entry in the current tab
+                help = "?",
+            },
+            tabs = {
+                headers = { label = "Headers", icon = "󰈻" },
+                vars = { label = "Variables", icon = "󰀫" },
+                grpc = { label = "gRPC", icon = "󰢌" }, -- shown only when the collection holds a GRPC request
             },
         },
     },
@@ -550,10 +592,7 @@ the sqlite history DB, lvim-keyring, the treesitter `http` grammar, and the lvim
 
 ## Roadmap
 
-The following are planned and partially scaffolded (the config keys above already reserve their
-options): **Lua scripting** with tests / assertions, **OAuth2** (incl. `authorization_code` / PKCE),
-native **gRPC** (reflection, streaming) and **WebSocket** through the daemon, and
-**Postman v2.1 / OpenAPI / HAR** import-export.
+Planned: HTTP/3; streaming gRPC.
 
 ## License
 
