@@ -123,6 +123,10 @@ local function teardown(err)
     ready = false
     job = nil
     stdout_tail = ""
+    -- The hello/proto belong to the process that just died; a restart handshakes anew, and until
+    -- then `M.info()` must not describe the old daemon.
+    proto = nil
+    hello = nil
     if idle_timer then
         pcall(function()
             idle_timer:stop()
