@@ -726,18 +726,34 @@ local function focused_name()
     return type(name) == "string" and name or ""
 end
 
---- Which tab the focused row belongs to.
----@return "params"|"headers"|"settings"
-local function focused_tab()
-    local name = focused_name()
+--- Which tab a row name belongs to. Auth / Body / gRPC rows are named after their tab (`auth:scheme`,
+--- `body:kind`, `grpc:service`); they used to be lumped in with "settings", so a key pressed on them
+--- answered with the settings tab's advice ("put the cursor in a @prompt / @stdin-cmd / @curl section").
+---@param name string
+---@return "params"|"headers"|"auth"|"body"|"grpc"|"settings"
+local function tab_of(name)
     if name:match("^param:%d+$") or name == "note:params" then
         return "params"
     end
     if name:match("^header:%d+$") or name == "note:headers" then
         return "headers"
     end
+    local tab = name:match("^(%a+):") or name:match("^note:(%a+)$")
+    if tab == "auth" or tab == "body" or tab == "grpc" then
+        return tab
+    end
     return "settings"
 end
+M._tab_of = tab_of
+
+--- Which tab the focused row belongs to.
+---@return "params"|"headers"|"auth"|"body"|"grpc"|"settings"
+local function focused_tab()
+    return tab_of(focused_name())
+end
+
+--- The user-facing name of a tab.
+local TAB_LABEL = { auth = "Auth", body = "Body", grpc = "gRPC" }
 
 --- The 1-based index encoded in the focused row's name (`param:3` → 3).
 ---@param prefix string
@@ -757,7 +773,11 @@ local function action_add()
     if not (ed and h) then
         return
     end
-    if focused_tab() == "params" then
+    local tab = focused_tab()
+    if TAB_LABEL[tab] then
+        return notify("the " .. TAB_LABEL[tab] .. " tab has no addable rows — edit its values in place (<CR>)", vim.log.levels.WARN)
+    end
+    if tab == "params" then
         return ask("New query parameter (name=value)", "", function(text)
             local name, value = text:match("^([^=]+)=(.*)$")
             if not name then
@@ -769,7 +789,7 @@ local function action_add()
             ed:set_params(params)
             refresh_soon()
         end)
-    elseif focused_tab() == "headers" then
+    elseif tab == "headers" then
         return ask("New header (Name: value)", "", function(text)
             local name, value = text:match("^([^:]+):%s*(.*)$")
             if not name then
@@ -810,6 +830,9 @@ local function action_delete()
         return
     end
     local tab = focused_tab()
+    if TAB_LABEL[tab] then
+        return notify("the " .. TAB_LABEL[tab] .. " tab has no deletable rows — clear the value instead", vim.log.levels.WARN)
+    end
     if tab == "params" then
         local i = focused("param")
         if not i then
@@ -875,6 +898,9 @@ local function action_rename()
         return
     end
     local tab = focused_tab()
+    if TAB_LABEL[tab] then
+        return notify("the " .. TAB_LABEL[tab] .. " tab has no renamable rows", vim.log.levels.WARN)
+    end
     if tab == "params" then
         local i = focused("param")
         local req = ed:request()
