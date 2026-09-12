@@ -308,14 +308,36 @@ local function yank_body()
     vim.notify("lvim-rest: body yanked", vim.log.levels.INFO)
 end
 
---- Save the response body to a file (prompted).
+--- The response's Content-Type header value ("" when it has none).
+---@param result table
+---@return string
+local function content_type_of(result)
+    for _, h in ipairs(result.headers or {}) do
+        if type(h.name) == "string" and h.name:lower() == "content-type" then
+            return h.value or ""
+        end
+    end
+    return ""
+end
+
+--- The file extension for a response body, from its Content-Type (json / html / xml / js / css / csv;
+--- anything else is txt).
+---@param result table
+---@return string
+local function body_ext(result)
+    local ft = format.content_filetype(content_type_of(result))
+    return ({ javascript = "js", text = "txt" })[ft] or ft
+end
+
+--- Save the response body to a file (prompted). The suggested name's extension follows the
+--- response's Content-Type.
 local function save_body()
     if not state.result then
         return
     end
     require("lvim-ui").input({
         title = "Save response body to",
-        default = "response" .. (format.content_filetype(nil) == "json" and ".json" or ".txt"),
+        default = "response." .. body_ext(state.result),
         callback = function(ok, path)
             if not ok or not path or path == "" then
                 return
@@ -590,14 +612,7 @@ function M.show(result, meta)
     if result.body and #result.body > config.format.max_size then
         local dir = vim.fn.stdpath("state") .. "/lvim-rest"
         vim.fn.mkdir(dir, "p")
-        local ct = ""
-        for _, h in ipairs(result.headers or {}) do
-            if h.name:lower() == "content-type" then
-                ct = h.value
-            end
-        end
-        local ext = format.content_filetype(ct)
-        local path = ("%s/response-%d.%s"):format(dir, os.time(), ext == "text" and "txt" or ext)
+        local path = ("%s/response-%d.%s"):format(dir, os.time(), body_ext(result))
         fs.write(path, result.body)
         state.oversized = path
     end
