@@ -113,7 +113,8 @@ local function method_icon(method)
 end
 
 --- Open the history picker (lvim-ui.select). `<CR>` reopens the stored response in the dock when its
---- body was recorded; otherwise it re-runs is left to the caller (phase 8 adds replay).
+--- body was recorded; an entry without a stored body only says so (replaying the LAST request is the
+--- runner's `keys.replay`, not the picker's job).
 function M.pick()
     local rows = M.list()
     if #rows == 0 then

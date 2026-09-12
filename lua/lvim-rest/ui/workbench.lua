@@ -72,7 +72,7 @@ local function pretty_key(lhs)
     return (lhs:gsub("<localleader>", ll):gsub("<leader>", lead):gsub("<[Cc]%-CR>", "⌃⏎"):gsub("<CR>", "⏎"))
 end
 
----@type table?  the attached footer-bar handle (an LvimUiWinFooter; closed with its window)
+---@type table?  the attached footer-bar handle (an LvimUiWinBand; closed with its window)
 local footer_handle = nil
 
 --- The editor window's current buffer + cursor line, for a footer handler to act on the open request.
