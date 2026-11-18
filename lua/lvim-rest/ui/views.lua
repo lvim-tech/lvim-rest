@@ -49,6 +49,24 @@ local function status_line(result, row)
     return line, { row = row, col_start = 0, col_end = #line, group = status_group(result.status or 0) }
 end
 
+--- A status glyph the dock paints (a frame direction, a pass / fail mark) as its lvim-icons IMAGE where UI
+--- icons are images ("material"): the image cells and the image's group — paint those bytes with that group
+--- only, its fg IS the image id. Anywhere else the glyph as given and nil.
+---@param glyph string
+---@param group string
+---@return string text, string? img_hl
+local function icon_cells(glyph, group)
+    local ok, iconlib = pcall(require, "lvim-utils.icons")
+    if not (ok and iconlib.ui_text) then
+        return glyph, nil
+    end
+    local t, h, img = iconlib.ui_text(glyph, group)
+    if not img then
+        return glyph, nil
+    end
+    return t, h
+end
+
 --- WebSocket transcript: one row per frame, `HH:MM:SS <arrow>  payload`.
 ---
 --- The two DIRECTIONS must be distinguishable at a glance — that is the whole information in a
@@ -56,22 +74,38 @@ end
 --- (`LvimRestRecv` / `LvimRestSent`). This is also what `ws.result` builds its body text from, so
 --- the transcript has exactly one formatter.
 ---@param session table  LvimRestWsSession
+---@param images? boolean  draw the direction glyphs as lvim-icons images where UI icons are images — only
+---   for the dock; the TEXT `yank` / `save` copy keeps the glyphs
 ---@return { lines: string[], hls: table[], filetype: string }
-function M.transcript(session)
+function M.transcript(session, images)
     local lines, hls = {}, {}
     for _, m in ipairs(session and session.messages or {}) do
         local inbound = m.dir == "in"
-        local prefix = ("%s %s  "):format(
-            os.date("%H:%M:%S", m.ts),
-            inbound and config.icons.ws_in or config.icons.ws_out
-        )
-        lines[#lines + 1] = prefix .. (m.data or "")
-        hls[#hls + 1] = {
-            row = #lines - 1,
-            col_start = 0,
-            col_end = #prefix,
-            group = inbound and "LvimRestRecv" or "LvimRestSent",
-        }
+        local group = inbound and "LvimRestRecv" or "LvimRestSent"
+        local glyph = inbound and config.icons.ws_in or config.icons.ws_out
+        local ts = os.date("%H:%M:%S", m.ts) --[[@as string]]
+        local icon, img_hl = glyph, nil
+        if images then
+            icon, img_hl = icon_cells(glyph, group)
+        end
+        if img_hl then
+            -- the image takes two cells: one blank less after it keeps the payload column
+            local prefix = ts .. " " .. icon .. " "
+            lines[#lines + 1] = prefix .. (m.data or "")
+            local row, i0 = #lines - 1, #ts + 1
+            hls[#hls + 1] = { row = row, col_start = 0, col_end = i0, group = group }
+            hls[#hls + 1] = { row = row, col_start = i0, col_end = i0 + #icon, group = img_hl }
+            hls[#hls + 1] = { row = row, col_start = i0 + #icon, col_end = #prefix, group = group }
+        else
+            local prefix = ("%s %s  "):format(ts, glyph)
+            lines[#lines + 1] = prefix .. (m.data or "")
+            hls[#hls + 1] = {
+                row = #lines - 1,
+                col_start = 0,
+                col_end = #prefix,
+                group = group,
+            }
+        end
     end
     if #lines == 0 then
         lines[1] = "No frames yet."
@@ -85,7 +119,7 @@ end
 function M.body(result)
     -- A WebSocket result is a STREAM, not a document: it renders as its transcript.
     if result.ws then
-        return M.transcript(result.ws)
+        return M.transcript(result.ws, true)
     end
     local ct = header_value(result.headers, "content-type")
     local text = format.pretty(result.body or "", ct)
@@ -219,8 +253,14 @@ function M.script(result)
         lines[#lines + 1] = l
     end
     for _, e in ipairs(errs) do
-        lines[#lines + 1] = ("%s %s"):format(config.icons.fail, e)
-        hls[#hls + 1] = { row = #lines - 1, col_start = 0, col_end = #lines[#lines], group = "LvimRestFail" }
+        -- the fail mark as its lvim-icons image where UI icons are images (its own span, the image's group)
+        local icon, img_hl = icon_cells(config.icons.fail, "LvimRestFail")
+        lines[#lines + 1] = ("%s %s"):format(icon, e)
+        local c0 = img_hl and #icon or 0
+        if img_hl then
+            hls[#hls + 1] = { row = #lines - 1, col_start = 0, col_end = c0, group = img_hl }
+        end
+        hls[#hls + 1] = { row = #lines - 1, col_start = c0, col_end = #lines[#lines], group = "LvimRestFail" }
     end
     return { lines = lines, hls = hls, filetype = "text" }
 end
@@ -237,14 +277,19 @@ function M.report(result)
     local lines, hls = {}, {}
     local passed = 0
     for _, t in ipairs(tests) do
-        local mark = t.ok and config.icons.ok or config.icons.fail
+        local group = t.ok and "LvimRestPass" or "LvimRestFail"
+        -- the pass / fail mark as its lvim-icons image where UI icons are images (its own span)
+        local mark, img_hl = icon_cells(t.ok and config.icons.ok or config.icons.fail, group)
         local line = ("%s %s"):format(mark, t.name)
         if not t.ok and t.message then
             line = ("%s  %s %s"):format(line, config.icons.pointer, t.message)
         end
         lines[#lines + 1] = line
-        hls[#hls + 1] =
-            { row = #lines - 1, col_start = 0, col_end = #line, group = t.ok and "LvimRestPass" or "LvimRestFail" }
+        local c0 = img_hl and #mark or 0
+        if img_hl then
+            hls[#hls + 1] = { row = #lines - 1, col_start = 0, col_end = c0, group = img_hl }
+        end
+        hls[#hls + 1] = { row = #lines - 1, col_start = c0, col_end = #line, group = group }
         if t.ok then
             passed = passed + 1
         end

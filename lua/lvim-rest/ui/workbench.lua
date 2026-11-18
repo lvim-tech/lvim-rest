@@ -69,7 +69,7 @@ local function pretty_key(lhs)
     if lead == " " then
         lead = "SPC "
     end
-    return (lhs:gsub("<localleader>", ll):gsub("<leader>", lead):gsub("<[Cc]%-CR>", "⌃⏎"):gsub("<CR>", "⏎"))
+    return (lhs:gsub("<localleader>", ll):gsub("<leader>", lead):gsub("<[Cc]%-CR>", "\u{f0634}\u{f0311}"):gsub("<CR>", "\u{f0311}"))
 end
 
 ---@type table?  the attached footer-bar handle (an LvimUiWinBand; closed with its window)

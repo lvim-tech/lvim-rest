@@ -70,7 +70,7 @@ local function set_summary()
         text = text .. "  …"
     else
         -- Just the verdict GLYPH (the counts are already in "N ok · N failed" — don't repeat the number).
-        local verdict = state.failed == 0 and "  ✓" or "  ✗"
+        local verdict = state.failed == 0 and "  \u{f0e1e}" or "  \u{f1398}"
         spans[#spans + 1] =
             { #text, #text + #verdict, state.failed == 0 and "LvimRestStatus2xx" or "LvimRestStatus5xx" }
         text = text .. verdict
@@ -155,7 +155,7 @@ function M.run(collection_id, folder_id, label)
     pcall(api.nvim_win_set_buf, win, buf)
     pcall(api.nvim_set_current_win, win)
     vim.wo[win].winhighlight = "WinBar:LvimUiPeekTitleHover,WinBarNC:LvimUiPeekTitle"
-    vim.wo[win].winbar = "%=  RUN ▸ " .. (label or "") .. "  %="
+    vim.wo[win].winbar = "%=  RUN \u{f0142} " .. (label or "") .. "  %="
 
     iterate.run({
         collection_id = collection_id,

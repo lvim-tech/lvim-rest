@@ -348,6 +348,6 @@ return {
         folder = "󰉋",
         request = "󰋼",
         pointer = "󰅂",
-        spinner = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
+        spinner = { "\u{f0a9e}", "\u{f0a9f}", "\u{f0aa0}", "\u{f0aa1}", "\u{f0aa2}", "\u{f0aa3}", "\u{f0aa4}", "\u{f0aa5}" },
     },
 }

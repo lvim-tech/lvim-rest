@@ -414,7 +414,7 @@ footer_spec = function()
         local registry = {
             open = {
                 name = "open",
-                key = "⏎",
+                key = "\u{f0311}",
                 run = function()
                     open_log(focused_log_entry())
                 end,
