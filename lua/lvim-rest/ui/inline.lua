@@ -1,7 +1,7 @@
 -- lvim-rest.ui.inline: the per-request status lane (kulala's icon lane, our canon glyphs).
 --
 -- An end-of-line extmark on the request line: a braille spinner (method-accent) while the request
--- runs, then `➤ 200 OK · 132 ms` in the status accent when it finishes (or a red error chip). One
+-- runs, then `󰅂 200 OK · 132 ms` in the status accent when it finishes (or a red error chip). One
 -- animation timer per running request; both are cleared on cancel / re-send.
 --
 ---@module "lvim-rest.ui.inline"

@@ -156,7 +156,7 @@
 ---@field expand_closed string  Caret of a CLOSED fold header
 ---@field ws_in      string  Inbound websocket frame marker
 ---@field ws_out     string  Outbound websocket frame marker
----@field pointer    string  Active/selected marker + sequence separator (canon `➤`)
+---@field pointer    string  Active/selected marker + sequence separator (canon `󰅂`)
 ---@field spinner    string[] Braille spinner frames for the inline running lane
 
 ---@class LvimRestConfig
@@ -326,7 +326,7 @@ return {
         save_into = "<localleader>v",
         options = "<localleader>o",
     },
-    -- Real Nerd Font single-width glyphs (verified via strdisplaywidth); `➤` for pointers/separators.
+    -- Real Nerd Font single-width glyphs (verified via strdisplaywidth); `󰅂` for pointers/separators.
     icons = {
         get = "󰇚",
         post = "󰆐",
@@ -336,8 +336,8 @@ return {
         graphql = "󰡷",
         grpc = "󰢹",
         ws = "󰖟",
-        expand_open = "",
-        expand_closed = "",
+        expand_open = "󰅀",
+        expand_closed = "󰅂",
         ws_in = "󰁅", -- a frame the server sent — the two directions must not look the same
         ws_out = "󰁝", -- a frame this editor sent
         ok = "󰄬",
@@ -347,7 +347,7 @@ return {
         collection = "󰉓",
         folder = "󰉋",
         request = "󰋼",
-        pointer = "➤",
+        pointer = "󰅂",
         spinner = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
     },
 }

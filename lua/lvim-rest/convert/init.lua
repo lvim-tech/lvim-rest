@@ -200,7 +200,7 @@ local function pick_folder(collection_id, fn)
         for _, f in ipairs(library.folders(collection_id, parent)) do
             items[#items + 1] = { label = prefix .. f.name, icon = require("lvim-rest.config").icons.folder }
             ids[#ids + 1] = f.id
-            walk(f.id, prefix .. f.name .. " ➤ ")
+            walk(f.id, prefix .. f.name .. " 󰅂 ")
         end
     end
     walk(nil, "")

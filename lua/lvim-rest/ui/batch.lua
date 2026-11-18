@@ -3,7 +3,7 @@
 -- Running a folder/collection (`a All` in the tree) opens a READ-ONLY document of all its requests in the
 -- editor pane — one `### name` + request line per block. As the run walks them (through the ordinary
 -- `runner.iterate`, so it is the exact same send path), each block gains a LIVE inline status (spinner →
--- `➤ 200 OK · 45 ms`, the same lane a single send uses), and the top line carries a running SUMMARY
+-- `󰅂 200 OK · 45 ms`, the same lane a single send uses), and the top line carries a running SUMMARY
 -- (`done/total · ok · failed`). Every full response also piles into the dock's `log` tab. `<CR>` on a block
 -- opens that request's response in the dock.
 --

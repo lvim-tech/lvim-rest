@@ -33,7 +33,7 @@ shared palette; every popup, picker and dock goes through the canonical lvim-ui 
   is kept (`dock.cache`), opening one shows its cached body, `R` re-sends it. Oversized bodies divert
   to a scratch file.
 - **Inline status** — a per-request end-of-line lane: a spinner while running, then
-  `➤ 200 OK · 132 ms` in the status accent.
+  `󰅂 200 OK · 132 ms` in the status accent.
 - **History** — every executed request is logged (sqlite); `:LvimRest history` reopens or lists past
   runs. `@no-log` skips a request.
 - **The request library (sqlite)** — workspaces ▸ collections ▸ nested folders ▸ requests, with
@@ -559,7 +559,7 @@ require("lvim-rest").setup({
         save_into = "<localleader>v",
         options = "<localleader>o",
     },
-    icons = { -- real Nerd Font single-width glyphs; ➤ for pointers
+    icons = { -- real Nerd Font single-width glyphs; 󰅂 for pointers
         get = "󰇚",
         post = "󰆐",
         put = "󰏫",
@@ -568,8 +568,8 @@ require("lvim-rest").setup({
         graphql = "󰡷",
         grpc = "󰢹",
         ws = "󰖟",
-        expand_open = "", -- the options form's fold carets
-        expand_closed = "",
+        expand_open = "󰅀", -- the options form's fold carets
+        expand_closed = "󰅂",
         ws_in = "󰁅", -- an inbound websocket frame
         ws_out = "󰁝", -- an outbound one
         ok = "󰄬",
@@ -579,7 +579,7 @@ require("lvim-rest").setup({
         collection = "󰉓",
         folder = "󰉋",
         request = "󰋼",
-        pointer = "➤",
+        pointer = "󰅂",
         spinner = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
     },
 })
